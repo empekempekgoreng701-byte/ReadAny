@@ -4499,52 +4499,110 @@ html, body {
     // ─── Chapter Translation Handlers ───
 
     function handleGetChapterParagraphs() {
-      try {
-        // First try: view.renderer.getContents()
-        var doc = null;
-        var renderer = view && view.renderer;
-        if (renderer && renderer.getContents) {
+      // Retry with exponential backoff to handle timing issues when renderer is not ready
+      var maxRetries = 3;
+      var retryDelay = 300; // ms
+      var attempt = 0;
+
+      function isReaderReady() {
+        // Check if view.renderer is properly initialized
+        if (!view || !view.renderer) return false;
+        var renderer = view.renderer;
+        if (!renderer.getContents) return false;
+        var contents = renderer.getContents();
+        if (!contents || !contents.length || !contents[0]) return false;
+        return true;
+      }
+
+      function tryExtract() {
+        attempt++;
+        try {
+          // Verify readiness before extraction
+          if (!isReaderReady()) {
+            if (attempt < maxRetries) {
+              setTimeout(tryExtract, retryDelay * attempt);
+              return;
+            }
+            postToRN('chapterParagraphs', { paragraphs: [], error: 'Reader not ready after ' + maxRetries + ' retries. Please wait for the chapter to fully load and try again.' });
+            return;
+          }
+
+          // Extract document from view.renderer.getContents()
+          var doc = null;
+          var renderer = view.renderer;
           var contents = renderer.getContents();
-          if (contents && contents.length && contents[0] && contents[0].doc) {
+          if (contents[0] && contents[0].doc) {
             doc = contents[0].doc;
           }
-        }
 
-        // Fallback: scan iframes
-        if (!doc) {
-          var iframes = document.querySelectorAll('iframe');
-          for (var fi = 0; fi < iframes.length; fi++) {
-            try {
-              var iframeDoc = iframes[fi].contentDocument || (iframes[fi].contentWindow && iframes[fi].contentWindow.document);
-              if (iframeDoc && iframeDoc.body && iframeDoc.body.innerText && iframeDoc.body.innerText.trim().length > 0) {
-                doc = iframeDoc;
-                break;
-              }
-            } catch (e) { /* cross-origin, skip */ }
+          // Fallback: scan iframes if renderer document not available
+          if (!doc) {
+            var iframes = document.querySelectorAll('iframe');
+            for (var fi = 0; fi < iframes.length; fi++) {
+              try {
+                var iframeDoc = iframes[fi].contentDocument || (iframes[fi].contentWindow && iframes[fi].contentWindow.document);
+                if (iframeDoc && iframeDoc.body && iframeDoc.body.innerText && iframeDoc.body.innerText.trim().length > 0) {
+                  doc = iframeDoc;
+                  break;
+                }
+              } catch (e) { /* cross-origin, skip */ }
+            }
           }
-        }
 
-        if (!doc) {
-          postToRN('chapterParagraphs', { paragraphs: [], error: 'no document found (view=' + !!view + ', renderer=' + !!renderer + ', iframes=' + document.querySelectorAll('iframe').length + ')' });
-          return;
-        }
+          if (!doc) {
+            // Retry if attempts remaining
+            if (attempt < maxRetries) {
+              setTimeout(tryExtract, retryDelay * attempt);
+              return;
+            }
+            postToRN('chapterParagraphs', { paragraphs: [], error: 'No chapter document found after ' + maxRetries + ' retries. The chapter may still be loading.' });
+            return;
+          }
 
-        var blockSelector = "p, h1, h2, h3, h4, h5, h6, li, blockquote, dd, dt, figcaption, pre, td, th";
-        var blocks = doc.querySelectorAll(blockSelector);
-        var paragraphs = [];
-        for (var i = 0; i < blocks.length; i++) {
-          var el = blocks[i];
-          var text = (el.innerText || el.textContent || '').trim();
-          if (text.length < 2) continue;
-          var id = 'para_' + i;
-          el.setAttribute('data-translate-id', id);
-          paragraphs.push({ id: id, text: text, tagName: el.tagName.toLowerCase() });
-        }
+          // Verify document has body and content
+          if (!doc.body || !doc.body.innerText || doc.body.innerText.trim().length === 0) {
+            if (attempt < maxRetries) {
+              setTimeout(tryExtract, retryDelay * attempt);
+              return;
+            }
+            postToRN('chapterParagraphs', { paragraphs: [], error: 'Chapter document is empty after ' + maxRetries + ' retries.' });
+            return;
+          }
 
-        postToRN('chapterParagraphs', { paragraphs: paragraphs });
-      } catch (err) {
-        postToRN('chapterParagraphs', { paragraphs: [], error: String(err) });
+          // Extract paragraphs from block-level elements
+          var blockSelector = "p, h1, h2, h3, h4, h5, h6, li, blockquote, dd, dt, figcaption, pre, td, th";
+          var blocks = doc.querySelectorAll(blockSelector);
+          var paragraphs = [];
+          for (var i = 0; i < blocks.length; i++) {
+            var el = blocks[i];
+            var text = (el.innerText || el.textContent || '').trim();
+            if (text.length < 2) continue;
+            var id = 'para_' + i;
+            el.setAttribute('data-translate-id', id);
+            paragraphs.push({ id: id, text: text, tagName: el.tagName.toLowerCase() });
+          }
+
+          // Retry if no paragraphs found
+          if (paragraphs.length === 0) {
+            if (attempt < maxRetries) {
+              setTimeout(tryExtract, retryDelay * attempt);
+              return;
+            }
+            postToRN('chapterParagraphs', { paragraphs: [], error: 'No text paragraphs found in chapter after ' + maxRetries + ' retries. The chapter may contain only images or the content is still loading.' });
+            return;
+          }
+
+          postToRN('chapterParagraphs', { paragraphs: paragraphs });
+        } catch (err) {
+          if (attempt < maxRetries) {
+            setTimeout(tryExtract, retryDelay * attempt);
+            return;
+          }
+          postToRN('chapterParagraphs', { paragraphs: [], error: 'Failed to extract chapter paragraphs: ' + String(err) });
+        }
       }
+
+      tryExtract();
     }
 
     function getReaderLayoutSignature(doc) {
