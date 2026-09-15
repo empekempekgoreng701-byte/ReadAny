@@ -81,13 +81,29 @@ module.exports = function withAndroidShortcuts(config, props) {
     },
   ]);
 
-  // 2. Reference it from <application android:shortcuts="@xml/shortcuts">
-  //    and fix targetClass/targetPackage to the real values.
+  // 2. Reference it from the MAIN/LAUNCHER <activity>
+  //    (android:shortcuts is an <activity> attribute, NOT <application> —
+  //    putting it on <application> fails AAPT linking with
+  //    "error: attribute android:shortcuts not found").
   config = withAndroidManifest(config, (cfg) => {
     const manifest = cfg.modResults.manifest;
     const app = manifest.application && manifest.application[0];
-    if (!app) return cfg;
-    app.$["android:shortcuts"] = "@xml/shortcuts";
+    const activities = (app && app.activity) || [];
+    const launcher = activities.find((a) => {
+      const filters = a["intent-filter"] || [];
+      return filters.some((f) => {
+        const actions = (f.action || []).map((x) => x.$ && x.$["android:name"]);
+        const cats = (f.category || []).map((x) => x.$ && x.$["android:name"]);
+        return (
+          actions.includes("android.intent.action.MAIN") &&
+          cats.includes("android.intent.category.LAUNCHER")
+        );
+      });
+    });
+    const target = launcher || activities[0];
+    if (!target) return cfg;
+    target.$ = target.$ || {};
+    target.$["android:shortcuts"] = "@xml/shortcuts";
     return cfg;
   });
 
