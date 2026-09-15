@@ -81,10 +81,12 @@ module.exports = function withAndroidShortcuts(config, props) {
     },
   ]);
 
-  // 2. Reference it from the MAIN/LAUNCHER <activity>
-  //    (android:shortcuts is an <activity> attribute, NOT <application> —
-  //    putting it on <application> fails AAPT linking with
-  //    "error: attribute android:shortcuts not found").
+  // 2. Reference it from the MAIN/LAUNCHER <activity> via a
+  //    <meta-data android:name="android.app.shortcuts"
+  //               android:resource="@xml/shortcuts" /> child element.
+  //    (There is NO android:shortcuts manifest attribute — writing one
+  //    on <application> or <activity> fails AAPT linking with
+  //    "error: attribute android:shortcuts not found".)
   config = withAndroidManifest(config, (cfg) => {
     const manifest = cfg.modResults.manifest;
     const app = manifest.application && manifest.application[0];
@@ -102,8 +104,18 @@ module.exports = function withAndroidShortcuts(config, props) {
     });
     const target = launcher || activities[0];
     if (!target) return cfg;
-    target.$ = target.$ || {};
-    target.$["android:shortcuts"] = "@xml/shortcuts";
+    target["meta-data"] = target["meta-data"] || [];
+    const exists = target["meta-data"].some(
+      (m) => m.$ && m.$["android:name"] === "android.app.shortcuts",
+    );
+    if (!exists) {
+      target["meta-data"].push({
+        $: {
+          "android:name": "android.app.shortcuts",
+          "android:resource": "@xml/shortcuts",
+        },
+      });
+    }
     return cfg;
   });
 
