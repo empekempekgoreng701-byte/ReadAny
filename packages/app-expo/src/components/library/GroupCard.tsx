@@ -164,7 +164,9 @@ export const GroupCard = memo(function GroupCard({
       activeOpacity={0.76}
       onPress={() => onOpen(group.id)}
       onLongPress={() => onLongPress?.(group)}
-      delayLongPress={450}
+      delayLongPress={350}
+      delayPressIn={0}
+      hitSlop={{ top: 8, bottom: 12, left: 8, right: 8 }}
     >
       <View style={[bookStyles.coverWrap, { backgroundColor: colors.muted }]}>
         {previewBooks.length > 0 ? (
@@ -183,26 +185,23 @@ export const GroupCard = memo(function GroupCard({
             <FolderIcon size={40} color={colors.mutedForeground} />
           </View>
         )}
-        {onLongPress ? (
-          <View style={[bookStyles.moreButtonWrap, styles.moreButtonWrap]} pointerEvents="box-none">
-            <TouchableOpacity
-              style={bookStyles.moreButton}
-              activeOpacity={0.85}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              onPress={(event) => {
-                event.stopPropagation();
-                onLongPress(group);
-              }}
-            >
-              <MoreVerticalIcon size={14} color="#fff" />
-            </TouchableOpacity>
-          </View>
-        ) : null}
       </View>
       <View style={bookStyles.infoWrap}>
-        <Text style={bookStyles.bookTitle} numberOfLines={1}>
-          {group.name}
-        </Text>
+        <View style={bookStyles.titleRow}>
+          <Text style={[bookStyles.bookTitle, { flex: 1 }]} numberOfLines={1}>
+            {group.name}
+          </Text>
+          {onLongPress ? (
+            <TouchableOpacity
+              style={bookStyles.menuButtonInline}
+              activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              onPress={() => onLongPress(group)}
+            >
+              <MoreVerticalIcon size={16} color={colors.mutedForeground} />
+            </TouchableOpacity>
+          ) : null}
+        </View>
         <Text style={bookStyles.bookAuthor} numberOfLines={1}>
           {t("library.groupBookCount", { count: books.length, defaultValue: `${books.length} 本` })}
         </Text>

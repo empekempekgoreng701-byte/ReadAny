@@ -6,6 +6,7 @@ import {
   CloudIcon,
   CpuIcon,
   DatabaseIcon,
+  EyeIcon,
   FlameIcon,
   HelpCircleIcon,
   InfoIcon,
@@ -80,6 +81,7 @@ type ProfileMenuRoute = Extract<
   | "TranslationSettings"
   | "Skills"
   | "VectorModelSettings"
+  | "SecuritySettings"
   | "Feedback"
   | "About"
 >;
@@ -435,6 +437,11 @@ export function ProfileScreen() {
             route: "FontSettings" as const,
           },
           { icon: CloudIcon, label: t("settings.sync", "同步"), route: "SyncSettings" as const },
+          {
+            icon: EyeIcon,
+            label: t("settings.security", "安全"),
+            route: "SecuritySettings" as const,
+          },
         ],
       },
       {

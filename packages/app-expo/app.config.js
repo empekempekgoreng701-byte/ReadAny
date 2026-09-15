@@ -42,12 +42,65 @@ module.exports = {
         "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
         "android.permission.MODIFY_AUDIO_SETTINGS",
       ],
+      // Phase 10.1 + 10.2: open ebook files from File Manager / other apps.
+      // Only formats the reader provably opens (verified in foliate view.js
+      // makeBook + Phase 9 converters): EPUB, PDF, MOBI/AZW, CBZ, FB2/FBZ,
+      // TXT, DOCX, HTML, MD. CBR/DJVU/CHM are NOT registered.
+      intentFilters: [
+        {
+          action: "VIEW",
+          category: ["DEFAULT"],
+          data: [
+            { scheme: "content", mimeType: "application/epub+zip" },
+            { scheme: "content", mimeType: "application/pdf" },
+            { scheme: "content", mimeType: "application/x-mobipocket-ebook" },
+            { scheme: "content", mimeType: "application/vnd.amazon.ebook" },
+            { scheme: "content", mimeType: "application/vnd.comicbook+zip" },
+            { scheme: "content", mimeType: "application/x-fictionbook+xml" },
+            { scheme: "content", mimeType: "application/x-zip-compressed-fb2" },
+            { scheme: "content", mimeType: "text/plain" },
+            { scheme: "content", mimeType: "text/html" },
+            { scheme: "content", mimeType: "text/markdown" },
+            {
+              scheme: "content",
+              mimeType:
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            },
+            { scheme: "file", mimeType: "application/epub+zip" },
+            { scheme: "file", mimeType: "application/pdf" },
+            { scheme: "file", mimeType: "application/x-mobipocket-ebook" },
+            { scheme: "file", mimeType: "application/vnd.amazon.ebook" },
+            { scheme: "file", mimeType: "application/vnd.comicbook+zip" },
+            { scheme: "file", mimeType: "application/x-fictionbook+xml" },
+            { scheme: "file", mimeType: "application/x-zip-compressed-fb2" },
+            { scheme: "file", mimeType: "text/plain" },
+            { scheme: "file", mimeType: "text/html" },
+            { scheme: "file", mimeType: "text/markdown" },
+            {
+              scheme: "file",
+              mimeType:
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            },
+          ],
+        },
+        {
+          action: "SEND",
+          category: ["DEFAULT"],
+          data: [{ scheme: "content", mimeType: "application/epub+zip" }],
+        },
+      ],
     },
     plugins: [
       [
         "expo-dev-client",
         {
           launchMode: "launcher",
+        },
+      ],
+      [
+        "expo-local-authentication",
+        {
+          faceIDPermission: "Allow ReadAny to use Face ID to unlock the app.",
         },
       ],
       [
@@ -68,6 +121,7 @@ module.exports = {
         },
       ],
       "./plugins/withGradleMemory",
+      ["./plugins/withAndroidShortcuts", { scheme: variant.scheme }],
       "expo-font",
       [
         "expo-image-picker",
@@ -91,9 +145,6 @@ module.exports = {
     scheme: variant.scheme,
     extra: {
       appVariant: variant.key,
-      eas: {
-        projectId: "e9c65825-d965-4d58-a3af-46406ee8a9ae",
-      },
     },
   },
 };

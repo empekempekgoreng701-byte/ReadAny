@@ -7,7 +7,7 @@ import {
   InfoIcon,
   Trash2Icon,
 } from "@/components/ui/Icon";
-import { useLibraryStore } from "@/stores/library-store";
+import { FAVORITE_TAG, useLibraryStore } from "@/stores/library-store";
 import { type ThemeColors, fontSize, fontWeight, radius, spacing, useColors } from "@/styles/theme";
 import type { Book } from "@readany/core/types";
 import { type ReactNode, useMemo, useState } from "react";
@@ -56,13 +56,28 @@ export function BookCardActionSheet({
   const moveBookToGroup = useLibraryStore((state) => state.moveBookToGroup);
   const removeBookFromGroup = useLibraryStore((state) => state.removeBookFromGroup);
   const addGroup = useLibraryStore((state) => state.addGroup);
+  const toggleFavorite = useLibraryStore((state) => state.toggleFavorite);
 
   const handleMoveGroup = () => {
     onClose();
     setShowGroupPicker(true);
   };
 
+  const isFavorite = book.tags.includes(FAVORITE_TAG);
   const items = [
+    {
+      key: "favorite",
+      icon: (
+        <Text style={{ fontSize: 17, color: isFavorite ? "#FFB800" : colors.foreground }}>★</Text>
+      ),
+      label: isFavorite
+        ? t("library.removeFavorite", "取消收藏")
+        : t("library.addFavorite", "收藏"),
+      onPress: () => {
+        onClose();
+        toggleFavorite(book.id);
+      },
+    },
     onShowDetails
       ? {
           key: "details",

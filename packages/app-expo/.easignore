@@ -20,6 +20,15 @@ CHANGELOG
 tsconfig.tsbuildinfo
 metro.cache
 
+# Local Android build outputs (regenerated on the EAS worker;
+# android/app/build alone is ~2.2 GB and breaks the 1.3 GB upload)
+android/app/build/
+android/app/.cxx/
+android/build/
+android/.gradle/
+*.hprof
+*.log
+
 # Test files
 __tests__
 *.test.js

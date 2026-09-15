@@ -758,7 +758,7 @@ export function DesktopImportActions({ children, align = "end" }: DesktopImportA
         filters: [
           {
             name: "Books",
-            extensions: ["epub", "EPUB", "pdf", "PDF", "mobi", "MOBI", "azw", "AZW", "azw3", "AZW3", "fb2", "FB2", "fbz", "FBZ", "txt", "TXT", "cbz", "CBZ", "umd", "UMD"],
+            extensions: ["epub", "EPUB", "pdf", "PDF", "mobi", "MOBI", "azw", "AZW", "azw3", "AZW3", "fb2", "FB2", "fbz", "FBZ", "txt", "TXT", "cbz", "CBZ", "umd", "UMD", "docx", "DOCX", "html", "HTML", "htm", "HTM", "md", "MD", "markdown", "MARKDOWN"],
           },
         ],
       } as const);

@@ -296,7 +296,10 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
           if (cancelled) return;
 
           // Restore position after translation content changes layout.
+          // Add delay to ensure DOM/layout has stabilized before restoring position
           if (cfiBeforeInject && goToCfiRef.current) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            if (cancelled) return;
             await goToCfiRef.current(cfiBeforeInject);
           }
           if (cancelled) return;

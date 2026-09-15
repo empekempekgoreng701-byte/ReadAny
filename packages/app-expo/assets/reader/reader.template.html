@@ -138,6 +138,31 @@
       display: block;
     }
 
+    /* Phase 2: brightness / eye-care overlays */
+    #brightness-overlay, #eyecare-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 70;
+      pointer-events: none;
+      display: none;
+    }
+    #brightness-overlay { background: #000; }
+    #eyecare-overlay { background: rgba(255,180,80,0.18); }
+    #reading-ruler {
+      position: absolute;
+      left: 0; right: 0;
+      height: 2px;
+      z-index: 75;
+      pointer-events: none;
+      display: none;
+      background: rgba(59,130,246,0.55);
+      box-shadow: 0 0 0 1px rgba(59,130,246,0.25), 0 8px 20px rgba(59,130,246,0.22);
+    }
+    /* Background presets */
+    body.bg-sepia { --bg: #f4ecd8; --fg: #5b4636; }
+    body.bg-paper { --bg: #fdf6e3; --fg: #3f3a2e; }
+    body.bg-night { --bg: #0b1220; --fg: #cbd5e1; }
+
     /* Suppress iOS selection callout */
     * {
       -webkit-touch-callout: none !important;
@@ -151,6 +176,9 @@
 
 <body>
   <div id="reader-container">
+    <div id="brightness-overlay" aria-hidden="true"></div>
+    <div id="eyecare-overlay" aria-hidden="true"></div>
+    <div id="reading-ruler" aria-hidden="true"></div>
     <div id="pull-bookmark-indicator" aria-hidden="true" data-armed="false">
       <div class="pill" id="pull-bookmark-indicator-text"></div>
     </div>
@@ -191,6 +219,37 @@
     let searchGenerator = null;
     let searchResults = [];
     let searchIndex = 0;
+    // ── Phase 7: image gallery (thumb + CFI lokasi, lazy per section) ──
+    let imageGalleryJobId = 0;
+    let imageGalleryItems = []; // { sectionIndex, imgIndex, src, alt, cfi }
+    let imageGalleryReady = false;
+    // ── Fast whole-book text search: in-memory cache, Moon Reader style ──
+    // Cache holds plain text per section so queries scan strings instead of
+    // re-parsing every chapter. Navigation resolves CFI lazily for one match.
+    const FAST_SEARCH_MAX_RESULTS = 5000;
+    const FAST_SEARCH_EXCERPT_CONTEXT = 50;
+    const FAST_SEARCH_BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, blockquote, dd, dt, figcaption, pre';
+    let bookTextCache = null; // { bookRef, sections: [{ index, text }] }
+    let bookTextCacheJobId = 0;
+    let bookTextCacheBuildingFor = null;
+    let bookTextCacheReady = false;
+    let fastSearchToken = 0;
+    // ── Auto-scroll state ──
+    const AUTO_SCROLL_END_FRACTION = 0.999;
+    const AUTO_SCROLL_END_STALL_TICKS = 30;
+    const AUTO_SCROLL_DEFAULT_SPEED = 50; // px per second
+    let autoScrollActive = false;
+    let autoScrollSpeedPxPerSec = AUTO_SCROLL_DEFAULT_SPEED;
+    let autoScrollRafId = 0;
+    let autoScrollLastT = 0;
+    let autoScrollEndStallTicks = 0;
+    let autoScrollPageTimer = 0;
+    let lastAutoScrollFraction = null;
+    // Phase 2: brightness / eye-care / ruler / background
+    let brightnessValue = 100;
+    let eyeCareActive = false;
+    let rulerActive = false;
+    let backgroundPreset = 'default';
     let currentSectionIndex = 0;
     let totalSections = 0;
     let currentThemeColors = { bg: '#1c1c1e', fg: '#e8e8ed', muted: '#7c7c82', primary: '#3b82f6' };
@@ -621,6 +680,20 @@
         contents.find((content) => content.doc) ||
         null
       );
+    }
+
+    // Resolve the rendered document for an explicit section index.
+    // The paginator keeps neighboring sections loaded, so contents[0] is
+    // often NOT the chapter being read — always match by index first.
+    function getRendererContentForSection(sectionIndex) {
+      const contents = getRendererContents();
+      if (!contents.length) return null;
+      const index = Number(sectionIndex);
+      if (Number.isInteger(index)) {
+        const exact = contents.find((content) => content.doc && content.index === index);
+        if (exact) return exact;
+      }
+      return getPrimaryRendererContent();
     }
 
     function getRendererContentForCfi(cfi) {
@@ -1320,12 +1393,46 @@
           if (view && msg.cfi) await view.goTo(msg.cfi);
           break;
         case 'search':
-          await handleSearch(msg.query);
+          await handleSearchFast(msg.query, msg.opts);
           break;
         case 'clearSearch':
           if (view) view.clearSearch();
           searchResults = [];
           searchIndex = 0;
+          fastSearchToken += 1;
+          break;
+        case 'goToSearchMatch':
+          if (msg.sectionIndex != null) goToCachedMatch(msg.sectionIndex, msg.blockIndex, msg.blockOffset);
+          break;
+        case 'ensureBookTextCache':
+          ensureBookTextCache();
+          break;
+        case 'setAutoScroll':
+          setAutoScroll(!!msg.active, Number(msg.speedPxPerSec) || 0);
+          break;
+        case 'setSpeedRead':
+          setSpeedRead(!!msg.active, Number(msg.wpm) || 0, Number(msg.chunkSize) || 0);
+          break;
+        case 'setBrightness':
+          setBrightnessValue(Number(msg.value));
+          break;
+        case 'setEyeCare':
+          setEyeCare(!!msg.active);
+          break;
+        case 'setReadingRuler':
+          setReadingRuler(!!msg.active);
+          break;
+        case 'setBackgroundPreset':
+          setBackgroundPreset(String(msg.preset || 'default'));
+          break;
+        case 'requestImageGallery':
+          ensureImageGallery();
+          break;
+        case 'goToImageLocation':
+          goToImageLocation(Number(msg.sectionIndex), Number(msg.imgIndex));
+          break;
+        case 'requestImageData':
+          requestImageData(Number(msg.sectionIndex), Number(msg.imgIndex), Number(msg.maxDim));
           break;
         case 'navigateSearch':
           if (msg.index != null) navigateToSearchResult(msg.index);
@@ -1427,6 +1534,19 @@
         clearTimeout(bookTextMetricsTimer);
         bookTextMetricsTimer = null;
       }
+      // Invalidate fast-search text cache when a (possibly different) book opens
+      bookTextCacheJobId += 1;
+      bookTextCache = null;
+      bookTextCacheReady = false;
+      fastSearchToken += 1;
+      stopAutoScrollLoop();
+      autoScrollActive = false;
+      lastAutoScrollFraction = null;
+      stopSpeedReadLoop();
+      speedReadActive = false;
+      speedReadWords = [];
+      speedReadPos = 0;
+      invalidateImageGallery();
 
       try {
         let hasSignalledLoaded = false;
@@ -1546,6 +1666,26 @@
         currentBook = book;
         attachBookTransformHandler(book);
 
+        // Phase 11 §1: destroy previous renderer BEFORE creating a new one.
+        // Without this, every openBook stacks another foliate-view + iframes.
+        try {
+          if (view && typeof view.close === 'function') view.close();
+        } catch (e) {}
+        view = null;
+        try {
+          const oldEl = readerElement;
+          if (oldEl && oldEl.parentNode) oldEl.parentNode.removeChild(oldEl);
+          // Defensive: drop any other stale foliate-view in the container
+          const container0 = document.getElementById('reader-container');
+          if (container0) {
+            const stale = container0.querySelectorAll('foliate-view');
+            for (let si = 0; si < stale.length; si++) {
+              try { stale[si].parentNode.removeChild(stale[si]); } catch (e2) {}
+            }
+          }
+        } catch (e) {}
+        readerElement = null;
+
         const el = document.createElement('foliate-view');
         readerElement = el;
         el.style.width = '100%';
@@ -1598,6 +1738,11 @@
           } else if (typeof detail.index === 'number') {
             currentSectionIndex = detail.index;
           }
+          // Chapter isolation: pause speed-read if user manually jumped chapters
+          // (auto-advance sets this flag so its own goTo doesn't trigger pause)
+          if (speedReadActive && currentSectionIndex !== previousSectionIndex && !speedReadAdvancing) {
+            setSpeedRead(false);
+          }
           const rendererPage = view && view.renderer && typeof view.renderer.page === 'number'
             ? view.renderer.page
             : null;
@@ -1610,6 +1755,7 @@
                 total: Math.max(1, rendererPages - 2),
               }
             : null;
+          lastAutoScrollFraction = detail.fraction;
           postToRN('relocate', {
             fraction: detail.fraction,
             section: { current: currentSectionIndex, total: relocatedSectionTotal },
@@ -1827,6 +1973,736 @@
         postToRN('searchResult', { index, count: searchResults.length });
       } catch (err) {
         postToRN('error', { message: 'Navigate search failed: ' + String(err) });
+      }
+    }
+
+    // ─── Fast whole-book search over cached plain text ───
+    // Build once per book (chunked + cancellable, same pattern as
+    // computeBookTextMetrics), then every query is a cheap string scan.
+    async function ensureBookTextCache() {
+      if (bookTextCacheReady && bookTextCache && bookTextCache.bookRef === currentBook) return true;
+      const book = currentBook;
+      if (!book || !book.sections || !book.sections.length) return false;
+      // Reuse in-flight build if one is already running for this book
+      if (bookTextCache === null && bookTextCacheBuildingFor === book) return false;
+      const myJob = ++bookTextCacheJobId;
+      bookTextCacheBuildingFor = book;
+      const sections = [];
+      const total = book.sections.length;
+      try {
+        for (let i = 0; i < total; i++) {
+          if (myJob !== bookTextCacheJobId || currentBook !== book) return false;
+          const section = book.sections[i];
+          if (!section || !section.createDocument) continue;
+          try {
+            const doc = await section.createDocument();
+            const blocks = collectSectionBlocks(doc);
+            if (blocks.length > 0) {
+              const joined = joinBlocks(blocks);
+              sections.push({ index: i, text: joined.text, bounds: joined.bounds });
+            }
+          } catch (err) { /* skip unreadable section */ }
+          if (i % 3 === 2) {
+            postToRN('searchCacheProgress', { progress: (i + 1) / total });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        }
+      } finally {
+        if (bookTextCacheBuildingFor === book) bookTextCacheBuildingFor = null;
+      }
+      if (myJob !== bookTextCacheJobId || currentBook !== book) return false;
+      bookTextCache = { bookRef: book, sections };
+      bookTextCacheReady = true;
+      postToRN('searchCacheProgress', { progress: 1 });
+      return true;
+    }
+
+    // Collect raw block texts (NO whitespace normalization) so cached char
+    // offsets map exactly onto live-DOM text nodes during navigation.
+    function collectSectionBlocks(doc) {
+      const blocks = [];
+      if (!doc || !doc.querySelectorAll) return blocks;
+      const els = doc.querySelectorAll(FAST_SEARCH_BLOCK_SELECTOR);
+      for (let i = 0; i < els.length; i++) {
+        const t = els[i].textContent || '';
+        if (t.trim().length < 2) continue;
+        blocks.push(t);
+      }
+      return blocks;
+    }
+
+    function joinBlocks(blocks) {
+      const bounds = [];
+      let text = '';
+      for (let i = 0; i < blocks.length; i++) {
+        bounds.push(text.length);
+        text += blocks[i] + '\n';
+      }
+      return { text, bounds };
+    }
+
+    function isWordChar(ch) {
+      return /[\p{L}\p{N}_]/u.test(ch);
+    }
+
+    function squashWhitespace(s) {
+      return (s || '').replace(/\s+/g, ' ');
+    }
+
+    function makeMatchExcerpt(text, matchStart, matchLength) {
+      const ctx = FAST_SEARCH_EXCERPT_CONTEXT;
+      return {
+        pre: squashWhitespace(text.slice(Math.max(0, matchStart - ctx), matchStart)),
+        match: squashWhitespace(text.slice(matchStart, matchStart + matchLength)),
+        post: squashWhitespace(text.slice(matchStart + matchLength, matchStart + matchLength + ctx)),
+      };
+    }
+
+    function matchOptionsOf(opts) {
+      const o = opts || {};
+      const direction = o.direction === 'forward' || o.direction === 'backward' ? o.direction : 'all';
+      return { matchCase: !!o.matchCase, wholeWord: !!o.wholeWord, direction };
+    }
+
+    function isWholeWordMatch(text, at, len) {
+      const before = at > 0 ? text.charAt(at - 1) : '';
+      const after = at + len < text.length ? text.charAt(at + len) : '';
+      if (before && isWordChar(before)) return false;
+      if (after && isWordChar(after)) return false;
+      return true;
+    }
+
+    // Locate the block containing a cached char offset (both derived from the
+    // same block list, so the mapping is exact).
+    function locateBlock(bounds, offset) {
+      let blockIndex = 0;
+      for (let i = 0; i < bounds.length; i++) {
+        if (bounds[i] <= offset) blockIndex = i;
+        else break;
+      }
+      return { blockIndex, blockOffset: offset - bounds[blockIndex] };
+    }
+
+    async function handleSearchFast(query, opts) {
+      const myToken = ++fastSearchToken;
+      if (!view || !query) return;
+      const { matchCase, wholeWord, direction } = matchOptionsOf(opts);
+      const needle = matchCase ? query : query.toLocaleLowerCase();
+      if (!needle) return;
+      const cacheOk = await ensureBookTextCache();
+      if (!cacheOk || myToken !== fastSearchToken) return;
+      const myCache = bookTextCache;
+      // Direction filter is section-level (current section always included)
+      const anchorSection = currentSectionIndex | 0;
+      const results = [];
+      let totalCount = 0;
+      let truncated = false;
+      for (const section of myCache.sections) {
+        if (myToken !== fastSearchToken) return; // superseded by newer query
+        if (direction === 'forward' && section.index < anchorSection) continue;
+        if (direction === 'backward' && section.index > anchorSection) continue;
+        const raw = section.text;
+        const haystack = matchCase ? raw : raw.toLocaleLowerCase();
+        let from = 0;
+        let seen = 0;
+        for (;;) {
+          const at = haystack.indexOf(needle, from);
+          if (at < 0) break;
+          from = at + Math.max(1, needle.length);
+          if (wholeWord && !isWholeWordMatch(raw, at, needle.length)) continue;
+          totalCount++;
+          if (results.length < FAST_SEARCH_MAX_RESULTS) {
+            const loc = locateBlock(section.bounds, at);
+            results.push({
+              sectionIndex: section.index,
+              blockIndex: loc.blockIndex,
+              blockOffset: loc.blockOffset,
+              excerpt: makeMatchExcerpt(raw, at, needle.length),
+            });
+          } else {
+            truncated = true;
+          }
+          seen++;
+          // Yield periodically so long scans don't block rendering
+          if (seen % 200 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+          if (myToken !== fastSearchToken) return;
+        }
+      }
+      if (myToken !== fastSearchToken) return;
+      postToRN('searchResultsList', { results, totalCount, truncated });
+      postToRN('searchComplete', { count: totalCount });
+    }
+
+    // Navigate to one cached match by exact (block, offset) coordinates.
+    // No second search pass needed; CFI is resolved via cfiForBlockOffset.
+    async function goToCachedMatch(sectionIndex, blockIndex, blockOffset) {
+      try {
+        if (!view) return;
+        const cfi = await cfiForBlockOffset(sectionIndex, blockIndex, blockOffset);
+        if (!cfi) return;
+        await view.goTo(cfi);
+        try {
+          if (window.flashHighlight) window.flashHighlight(cfi);
+        } catch (e) { /* highlight is best-effort */ }
+        postToRN('searchResult', { index: blockIndex | 0, count: 1 });
+      } catch (err) {
+        postToRN('error', { message: 'Navigate search failed: ' + String(err) });
+      }
+    }
+
+    // ─── Auto-scroll ───
+    // Scroll mode: rAF loop driving renderer.scrollBy (smooth, frame-paced).
+    // Paginated mode: timer driving view.next() (page interval derived from
+    // the same px/sec speed via viewport height).
+    function isContinuousAutoScrollMode() {
+      return currentViewMode === 'scroll' && view && !view.isFixedLayout;
+    }
+
+    function stopAutoScrollLoop() {
+      if (autoScrollRafId) {
+        try { cancelAnimationFrame(autoScrollRafId); } catch (e) {}
+        autoScrollRafId = 0;
+      }
+      if (autoScrollPageTimer) {
+        try { clearInterval(autoScrollPageTimer); } catch (e) {}
+        autoScrollPageTimer = 0;
+      }
+    }
+
+    function autoScrollFrame(t) {
+      if (!autoScrollActive) return;
+      const dt = Math.min(100, Math.max(0, t - autoScrollLastT));
+      autoScrollLastT = t;
+      try {
+        const renderer = view && view.renderer;
+        if (renderer && typeof renderer.scrollBy === 'function' && dt > 0) {
+          const d = (autoScrollSpeedPxPerSec * dt) / 1000;
+          if (currentSectionUsesVerticalWriting) renderer.scrollBy(-d, 0);
+          else renderer.scrollBy(0, d);
+        }
+      } catch (e) {}
+      // Stop at end of book: fraction pinned at max for N consecutive frames
+      const f = lastAutoScrollFraction;
+      if (f != null && f >= AUTO_SCROLL_END_FRACTION) {
+        autoScrollEndStallTicks++;
+        if (autoScrollEndStallTicks >= AUTO_SCROLL_END_STALL_TICKS) {
+          setAutoScroll(false);
+          return;
+        }
+      } else {
+        autoScrollEndStallTicks = 0;
+      }
+      autoScrollRafId = requestAnimationFrame(autoScrollFrame);
+    }
+
+    function setAutoScroll(active, speedPxPerSec) {
+      // Mutual exclusion with speed-read
+      if (active && speedReadActive) {
+        // Stop RSVP without restoring position (will be handled by RSVP exit)
+        speedReadActive = false;
+        stopSpeedReadLoop();
+        postToRN('speedReadState', { active: false, wpm: speedReadWpm, chunkSize: speedReadChunk });
+      }
+      stopAutoScrollLoop();
+      autoScrollActive = !!active;
+      if (typeof speedPxPerSec === 'number' && speedPxPerSec > 0) {
+        autoScrollSpeedPxPerSec = speedPxPerSec;
+      }
+      autoScrollEndStallTicks = 0;
+      if (autoScrollActive && view) {
+        if (isContinuousAutoScrollMode()) {
+          autoScrollLastT = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+          autoScrollRafId = requestAnimationFrame(autoScrollFrame);
+        } else {
+          const h = (readerElement && readerElement.clientHeight) || window.innerHeight || 700;
+          const interval = Math.min(20000, Math.max(1500, (h / autoScrollSpeedPxPerSec) * 1000));
+          autoScrollPageTimer = setInterval(() => {
+            try {
+              if (!autoScrollActive || !view) return;
+              // End-of-book: fraction pinned at max across consecutive ticks
+              const f = lastAutoScrollFraction;
+              if (f != null && f >= AUTO_SCROLL_END_FRACTION) {
+                autoScrollEndStallTicks++;
+                if (autoScrollEndStallTicks >= 3) {
+                  setAutoScroll(false);
+                  return;
+                }
+              } else {
+                autoScrollEndStallTicks = 0;
+              }
+              view.next();
+            } catch (e) {}
+          }, interval);
+        }
+      } else {
+        autoScrollActive = false;
+      }
+      postToRN('autoScrollState', { active: autoScrollActive, speedPxPerSec: autoScrollSpeedPxPerSec });
+    }
+
+    // ─── Speed-read RSVP (rapid serial visual presentation) ───
+    // Flashes word chunks in a centered overlay. Word source is the current
+    // section's blocks (same collector as fast search); exiting maps the
+    // current word back to a CFI so the reading position is preserved.
+    const SPEED_READ_DEFAULT_WPM = 300;
+    const SPEED_READ_DEFAULT_CHUNK = 3;
+    const SPEED_READ_MIN_WPM = 100;
+    const SPEED_READ_MAX_WPM = 800;
+    const SPEED_READ_MIN_CHUNK = 1;
+    const SPEED_READ_MAX_CHUNK = 10;
+    let speedReadActive = false;
+    let speedReadWpm = SPEED_READ_DEFAULT_WPM;
+    let speedReadChunk = SPEED_READ_DEFAULT_CHUNK;
+    let speedReadAdvancing = false;
+    let speedReadWords = []; // [{ text, blockIndex, blockOffset }]
+    let speedReadSectionIndex = -1;
+    let speedReadPos = 0;
+    let speedReadTimer = 0;
+    let speedReadOverlayEl = null;
+
+    function splitBlockWords(blockText) {
+      const out = [];
+      const re = /\S+/g;
+      let m = null;
+      while ((m = re.exec(blockText)) !== null) {
+        const token = m[0];
+        // CJK runs without spaces: flash per character
+        if (token.length > 1 && /[぀-ヿ㐀-䶿一-鿿豈-﫿]/.test(token)) {
+          for (let i = 0; i < token.length; i++) {
+            out.push({ text: token[i], offset: m.index + i });
+          }
+        } else {
+          out.push({ text: token, offset: m.index });
+        }
+      }
+      return out;
+    }
+
+    async function buildSpeedReadWords(sectionIndex) {
+      const book = currentBook;
+      if (!book || !book.sections) return false;
+      const section = book.sections[sectionIndex];
+      if (!section || !section.createDocument) return false;
+      try {
+        const doc = await section.createDocument();
+        const els = doc.querySelectorAll(FAST_SEARCH_BLOCK_SELECTOR);
+        const words = [];
+        let bi = 0;
+        for (let i = 0; i < els.length; i++) {
+          const t = els[i].textContent || '';
+          if (t.trim().length < 2) continue;
+          const parts = splitBlockWords(t);
+          for (const p of parts) {
+            words.push({ text: p.text, blockIndex: bi, blockOffset: p.offset });
+          }
+          bi++;
+        }
+        if (!words.length) return false;
+        speedReadWords = words;
+        speedReadSectionIndex = sectionIndex;
+        speedReadPos = 0;
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function ensureSpeedReadOverlay() {
+      if (speedReadOverlayEl) return speedReadOverlayEl;
+      const container = document.getElementById('reader-container');
+      if (!container) return null;
+      const el = document.createElement('div');
+      el.id = 'speedread-overlay';
+      el.setAttribute('aria-hidden', 'true');
+      el.style.cssText = 'position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);' +
+        'z-index:90;display:none;max-width:86%;padding:18px 22px;border-radius:14px;' +
+        'background:var(--bg,#1c1c1e);color:var(--fg,#e8e8ed);' +
+        'border:1px solid rgba(127,127,127,0.35);box-shadow:0 12px 30px rgba(0,0,0,0.25);' +
+        'font-size:30px;line-height:1.4;text-align:center;word-break:break-word;pointer-events:none;';
+      const wordEl = document.createElement('div');
+      wordEl.id = 'speedread-word';
+      const progEl = document.createElement('div');
+      progEl.id = 'speedread-progress';
+      progEl.style.cssText = 'margin-top:10px;font-size:12px;opacity:0.65;';
+      el.appendChild(wordEl);
+      el.appendChild(progEl);
+      container.appendChild(el);
+      speedReadOverlayEl = el;
+      return el;
+    }
+
+    function renderSpeedReadChunk() {
+      const overlay = ensureSpeedReadOverlay();
+      if (!overlay) return;
+      const wordEl = overlay.querySelector('#speedread-word');
+      const progEl = overlay.querySelector('#speedread-progress');
+      const chunk = [];
+      for (let i = 0; i < speedReadChunk && speedReadPos + i < speedReadWords.length; i++) {
+        chunk.push(speedReadWords[speedReadPos + i].text);
+      }
+      if (wordEl) wordEl.textContent = chunk.join(' ');
+      if (progEl) progEl.textContent = (speedReadPos + 1) + ' / ' + speedReadWords.length;
+      overlay.style.display = 'block';
+      postToRN('speedReadProgress', {
+        index: Math.min(speedReadPos, Math.max(0, speedReadWords.length - 1)),
+        total: speedReadWords.length,
+        sectionIndex: speedReadSectionIndex,
+      });
+    }
+
+    function speedReadTick() {
+      if (!speedReadActive) return;
+      if (speedReadPos >= speedReadWords.length) {
+        advanceSpeedReadSection();
+        return;
+      }
+      // Consume one chunk for timing, then render the NEXT chunk
+      let count = 0;
+      let sentenceEnd = false;
+      while (count < speedReadChunk && speedReadPos + count < speedReadWords.length) {
+        const w = speedReadWords[speedReadPos + count].text;
+        count++;
+        if (/[.!?…:;]$/.test(w)) sentenceEnd = true;
+      }
+      renderSpeedReadChunk();
+      speedReadPos += count;
+      const perWordMs = 60000 / Math.min(SPEED_READ_MAX_WPM, Math.max(SPEED_READ_MIN_WPM, speedReadWpm));
+      const delay = Math.round(perWordMs * Math.max(1, count) * (sentenceEnd ? 1.5 : 1));
+      speedReadTimer = setTimeout(speedReadTick, delay);
+    }
+
+    async function advanceSpeedReadSection() {
+      const book = currentBook;
+      const total = book && book.sections ? book.sections.length : 0;
+      const next = speedReadSectionIndex + 1;
+      // Stop at end of book, preserving position at last word
+      if (next < 0 || next >= total) {
+        await exitSpeedReadToPosition();
+        setSpeedRead(false);
+        return;
+      }
+      speedReadAdvancing = true;
+      try {
+        if (window.goToSection) await window.goToSection(next);
+      } catch (e) {}
+      // Give renderer a tick to fire relocate before clearing flag
+      await new Promise((r) => setTimeout(r, 120));
+      speedReadAdvancing = false;
+      const ok = await buildSpeedReadWords(next);
+      if (!ok || !speedReadActive) {
+        if (speedReadActive) await exitSpeedReadToPosition();
+        setSpeedRead(false);
+        return;
+      }
+      speedReadTick();
+    }
+
+    function stopSpeedReadLoop() {
+      if (speedReadTimer) {
+        try { clearTimeout(speedReadTimer); } catch (e) {}
+        speedReadTimer = 0;
+      }
+      if (speedReadOverlayEl) {
+        try { speedReadOverlayEl.style.display = 'none'; } catch (e) {}
+      }
+    }
+
+    async function exitSpeedReadToPosition() {
+      try {
+        const w = speedReadWords[Math.min(Math.max(0, speedReadPos - 1), Math.max(0, speedReadWords.length - 1))];
+        if (!w || !view || typeof view.getCFI !== 'function') return;
+        const cfi = await cfiForBlockOffset(speedReadSectionIndex, w.blockIndex, w.blockOffset);
+        if (cfi) await view.goTo(cfi);
+      } catch (e) {}
+    }
+
+    // Shared helper: CFI for exact (section, block, offset) coordinates.
+    // Used by fast-search navigation and speed-read exit alike.
+    async function cfiForBlockOffset(sectionIndex, blockIndex, blockOffset) {
+      const book = currentBook;
+      if (!view || typeof view.getCFI !== 'function' || !book || !book.sections) return null;
+      const section = book.sections[sectionIndex];
+      if (!section || !section.createDocument) return null;
+      try {
+        const doc = await section.createDocument();
+        const els = doc.querySelectorAll(FAST_SEARCH_BLOCK_SELECTOR);
+        const nonEmpty = [];
+        for (let i = 0; i < els.length; i++) {
+          const t = els[i].textContent || '';
+          if (t.trim().length >= 2) nonEmpty.push(els[i]);
+        }
+        if (!nonEmpty.length) return null;
+        const el = nonEmpty[Math.min(Math.max(0, blockIndex | 0), nonEmpty.length - 1)];
+        let remaining = Math.max(0, blockOffset | 0);
+        const walker = doc.createTreeWalker(el, 4 /* NodeFilter.SHOW_TEXT */);
+        let node = walker.nextNode();
+        let targetNode = null;
+        let targetOffset = 0;
+        while (node) {
+          const len = (node.nodeValue || '').length;
+          if (remaining <= len) {
+            targetNode = node;
+            targetOffset = remaining;
+            break;
+          }
+          remaining -= len;
+          node = walker.nextNode();
+        }
+        let range;
+        if (targetNode && targetNode.nodeType === 3) {
+          range = doc.createRange();
+          range.setStart(targetNode, Math.min(targetOffset, (targetNode.nodeValue || '').length));
+          range.collapse(true);
+        } else {
+          range = doc.createRange();
+          range.selectNodeContents(el);
+          range.collapse(true);
+        }
+        return view.getCFI(sectionIndex, range) || null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // ─── Phase 7: image gallery ───
+    // Collect <img> per section with CFI lokasi (lazy + chunked, cancellable).
+    // src blob URL valid di WebView saat koleksi; RN pakai untuk thumbnail.
+    // Phase 11 §3: gallery item cap — metadata per item is small but
+    // unbounded growth still hurts (komik 5000+ gambar). Items beyond the
+    // cap are counted but not stored; tap-to-view still works via CFI.
+    const IMAGE_GALLERY_MAX_ITEMS = 2000;
+    async function ensureImageGallery() {
+      if (imageGalleryReady && imageGalleryItems.length >= 0) return true;
+      const book = currentBook;
+      if (!book || !book.sections || !book.sections.length) return false;
+      const myJob = ++imageGalleryJobId;
+      const items = [];
+      let totalImages = 0;
+      let truncated = false;
+      const total = book.sections.length;
+      try {
+        for (let i = 0; i < total; i++) {
+          if (myJob !== imageGalleryJobId || currentBook !== book) return false;
+          const section = book.sections[i];
+          if (!section || !section.createDocument) continue;
+          try {
+            const doc = await section.createDocument();
+            const imgs = doc.querySelectorAll('img');
+            for (let j = 0; j < imgs.length; j++) {
+              const img = imgs[j];
+              const src = img.currentSrc || img.src || '';
+              if (!src) continue;
+              const w = img.naturalWidth || Number(img.getAttribute('width')) || 0;
+              const h = img.naturalHeight || Number(img.getAttribute('height')) || 0;
+              // Skip tiny icons/decorations
+              if (w > 0 && h > 0 && (w < 48 || h < 48)) continue;
+              totalImages++;
+              if (items.length >= IMAGE_GALLERY_MAX_ITEMS) {
+                truncated = true;
+                continue;
+              }
+              let cfi = null;
+              try {
+                const range = doc.createRange();
+                range.selectNode(img);
+                range.collapse(true);
+                cfi = view && view.getCFI ? view.getCFI(i, range) : null;
+              } catch (e) { /* CFI best-effort */ }
+              items.push({
+                sectionIndex: i,
+                imgIndex: j, // raw DOM index in this section (for requestImageData)
+                src,
+                alt: (img.getAttribute('alt') || '').slice(0, 120),
+                width: w,
+                height: h,
+                cfi,
+              });
+            }
+          } catch (err) { /* skip unreadable section */ }
+          if (i % 3 === 2) {
+            postToRN('imageGalleryProgress', { progress: (i + 1) / total });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        }
+      } catch (e) {
+        return false;
+      }
+      if (myJob !== imageGalleryJobId || currentBook !== book) return false;
+      imageGalleryItems = items;
+      imageGalleryReady = true;
+      postToRN('imageGallery', { items, totalCount: totalImages, truncated });
+      return true;
+    }
+
+    function invalidateImageGallery() {
+      imageGalleryJobId += 1;
+      imageGalleryItems = [];
+      imageGalleryReady = false;
+    }
+
+    // Kirim data gambar (thumbnail/full) sebagai dataURL ke RN.
+    // Blob URL WebView tidak bisa dibaca RN Image, jadi render via canvas.
+    async function requestImageData(sectionIndex, docImgIndex, maxDim) {
+      const si = Number(sectionIndex);
+      const di = Number(docImgIndex);
+      const maxSide = Math.max(48, Math.min(2000, Number(maxDim) || 240));
+      try {
+        const book = currentBook;
+        if (!book || !book.sections || !book.sections[si] || !book.sections[si].createDocument) {
+          postToRN('imageData', { sectionIndex: si, imgIndex: di, error: 'no-section' });
+          return;
+        }
+        const doc = await book.sections[si].createDocument();
+        const imgs = doc.querySelectorAll('img');
+        const img = imgs[di];
+        if (!img) {
+          postToRN('imageData', { sectionIndex: si, imgIndex: di, error: 'no-img' });
+          return;
+        }
+        // Tunggu gambar selesai load (maks 4 detik)
+        if (!img.complete || (img.naturalWidth || 0) === 0) {
+          await new Promise((resolve) => {
+            const done = () => resolve();
+            const to = setTimeout(done, 4000);
+            img.addEventListener('load', () => { clearTimeout(to); done(); }, { once: true });
+            img.addEventListener('error', () => { clearTimeout(to); done(); }, { once: true });
+          });
+        }
+        const src = img.currentSrc || img.src || '';
+        const natW = img.naturalWidth || 0;
+        const natH = img.naturalHeight || 0;
+        if (!natW || !natH) {
+          // Fallback: kirim src apa adanya (misal data: URL)
+          postToRN('imageData', { sectionIndex: si, imgIndex: di, dataUrl: src, width: 0, height: 0 });
+          return;
+        }
+        const scale = Math.min(1, maxSide / Math.max(natW, natH));
+        const cw = Math.max(1, Math.round(natW * scale));
+        const ch = Math.max(1, Math.round(natH * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = cw;
+        canvas.height = ch;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, cw, ch);
+        let dataUrl = '';
+        try {
+          dataUrl = canvas.toDataURL('image/jpeg', 0.72);
+        } catch (e) {
+          dataUrl = src;
+        }
+        postToRN('imageData', { sectionIndex: si, imgIndex: di, dataUrl, width: natW, height: natH });
+      } catch (err) {
+        postToRN('imageData', { sectionIndex: si, imgIndex: di, error: String(err) });
+      }
+    }
+
+    // Lompat ke lokasi gambar: pakai CFI yang sudah dikoleksi, fallback
+    // ke awal section bila CFI tidak tersedia.
+    async function goToImageLocation(sectionIndex, imgIndex) {
+      try {
+        const item = imageGalleryItems.find(
+          (it) => it.sectionIndex === sectionIndex && it.imgIndex === imgIndex,
+        );
+        if (item && item.cfi && view) {
+          await view.goTo(item.cfi);
+          return;
+        }
+        if (view && sectionIndex != null) {
+          try {
+            if (window.goToSection) await window.goToSection(sectionIndex);
+          } catch (e) {}
+        }
+      } catch (err) {
+        postToRN('error', { message: 'Go to image failed: ' + String(err) });
+      }
+    }
+
+    async function setSpeedRead(active, wpm, chunkSize) {
+      if (active && autoScrollActive) {
+        stopAutoScrollLoop();
+        autoScrollActive = false;
+        postToRN('autoScrollState', { active: false, speedPxPerSec: autoScrollSpeedPxPerSec });
+      }
+      stopSpeedReadLoop();
+      speedReadActive = !!active;
+      if (typeof wpm === 'number' && wpm > 0) {
+        speedReadWpm = Math.min(SPEED_READ_MAX_WPM, Math.max(SPEED_READ_MIN_WPM, Math.round(wpm)));
+      }
+      if (typeof chunkSize === 'number' && chunkSize > 0) {
+        speedReadChunk = Math.min(SPEED_READ_MAX_CHUNK, Math.max(SPEED_READ_MIN_CHUNK, Math.round(chunkSize)));
+      }
+      if (speedReadActive) {
+        if (!view || currentSectionIndex == null) {
+          speedReadActive = false;
+        } else {
+          const ok = await buildSpeedReadWords(currentSectionIndex);
+          if (!ok) {
+            speedReadActive = false;
+          } else {
+            speedReadTick();
+          }
+        }
+      } else {
+        await exitSpeedReadToPosition();
+      }
+      postToRN('speedReadState', {
+        active: speedReadActive,
+        wpm: speedReadWpm,
+        chunkSize: speedReadChunk,
+      });
+    }
+
+    // ─── Phase 2: brightness / eye-care / reading ruler / background ───
+    function setBrightnessValue(v) {
+      brightnessValue = Math.max(0, Math.min(100, Number(v) || 100));
+      const el = document.getElementById('brightness-overlay');
+      if (!el) return;
+      const opacity = (100 - brightnessValue) / 100 * 0.72;
+      el.style.display = opacity > 0.01 ? 'block' : 'none';
+      el.style.opacity = String(opacity);
+    }
+    function setEyeCare(active) {
+      eyeCareActive = !!active;
+      const el = document.getElementById('eyecare-overlay');
+      if (!el) return;
+      el.style.display = eyeCareActive ? 'block' : 'none';
+    }
+    function setBackgroundPreset(preset) {
+      backgroundPreset = preset || 'default';
+      document.body.classList.remove('bg-sepia', 'bg-paper', 'bg-night');
+      if (backgroundPreset === 'sepia') document.body.classList.add('bg-sepia');
+      else if (backgroundPreset === 'paper') document.body.classList.add('bg-paper');
+      else if (backgroundPreset === 'night') document.body.classList.add('bg-night');
+    }
+    let rulerTouchHandlerAttached = false;
+    function ensureRulerTouchHandler() {
+      if (rulerTouchHandlerAttached) return;
+      rulerTouchHandlerAttached = true;
+      const container = document.getElementById('reader-container');
+      if (!container) return;
+      const onMove = (e) => {
+        if (!rulerActive) return;
+        const ruler = document.getElementById('reading-ruler');
+        if (!ruler || !ruler.style.display || ruler.style.display === 'none') return;
+        const t = e.touches && e.touches[0] ? e.touches[0] : (e.changedTouches && e.changedTouches[0] ? e.changedTouches[0] : null);
+        if (!t) return;
+        const rect = container.getBoundingClientRect();
+        const y = Math.max(0, Math.min(rect.height - 2, t.clientY - rect.top));
+        ruler.style.top = y + 'px';
+      };
+      container.addEventListener('touchmove', onMove, { passive: true });
+      container.addEventListener('touchstart', onMove, { passive: true });
+    }
+    function setReadingRuler(active) {
+      rulerActive = !!active;
+      ensureRulerTouchHandler();
+      const el = document.getElementById('reading-ruler');
+      if (!el) return;
+      el.style.display = rulerActive ? 'block' : 'none';
+      if (rulerActive) {
+        const c = document.getElementById('reader-container');
+        const h = c ? c.clientHeight : window.innerHeight;
+        el.style.top = Math.round(h / 2) + 'px';
       }
     }
 
@@ -2646,6 +3522,27 @@ html, body {
         }
 
         const target = e.target || state.target;
+        // Phase 7: tap gambar → fullscreen viewer (sebelum page-turn)
+        const imgTarget = target && target.closest ? target.closest('img') : null;
+        if (imgTarget) {
+          e.preventDefault();
+          e.stopPropagation();
+          try {
+            const src = imgTarget.currentSrc || imgTarget.src || '';
+            const docImgs = doc.querySelectorAll('img');
+            let idxInDoc = -1;
+            for (let gi = 0; gi < docImgs.length; gi++) {
+              if (docImgs[gi] === imgTarget) { idxInDoc = gi; break; }
+            }
+            postToRN('imageTap', {
+              src,
+              alt: (imgTarget.getAttribute('alt') || '').slice(0, 120),
+              sectionIndex: currentSectionIndex,
+              imgIndexInSection: idxInDoc,
+            });
+          } catch (err) {}
+          return;
+        }
         const interactiveTarget = target && target.closest
           ? target.closest('a[href], audio, video, button, input, select, textarea')
           : null;
@@ -4125,9 +5022,20 @@ html, body {
     };
     window.goToCFI = function (cfi) { if (view) view.goTo(cfi); };
     window.goToProgress = function (p) { if (view) view.goToFraction(p); };
-    window.search = function (q) { handleSearch(q); };
+    window.search = function (q, opts) { handleSearchFast(q, opts); };
     window.navigateSearch = function (idx) { navigateToSearchResult(idx); };
-    window.clearSearch = function () { if (view) view.clearSearch(); searchResults = []; };
+    window.clearSearch = function () { if (view) view.clearSearch(); searchResults = []; fastSearchToken += 1; };
+    window.goToSearchMatch = function (sectionIndex, blockIndex, blockOffset) { goToCachedMatch(sectionIndex, blockIndex, blockOffset); };
+    window.ensureBookTextCache = function () { ensureBookTextCache(); };
+    window.setAutoScroll = function (active, speedPxPerSec) { setAutoScroll(active, speedPxPerSec); };
+    window.setSpeedRead = function (active, wpm, chunkSize) { setSpeedRead(active, wpm, chunkSize); };
+    window.setBrightnessValue = function (v) { setBrightnessValue(v); };
+    window.setEyeCare = function (active) { setEyeCare(active); };
+    window.setReadingRuler = function (active) { setReadingRuler(active); };
+    window.setBackgroundPreset = function (preset) { setBackgroundPreset(preset); };
+    window.requestImageGallery = function () { ensureImageGallery(); };
+    window.goToImageLocation = function (sectionIndex, imgIndex) { goToImageLocation(sectionIndex, imgIndex); };
+    window.requestImageData = function (sectionIndex, imgIndex, maxDim) { requestImageData(sectionIndex, imgIndex, maxDim); };
     window.setFontSize = function (s) { applySettings({ fontSize: s }); };
     window.setLineHeight = function (lh) { applySettings({ lineHeight: lh }); };
     window.setParagraphSpacing = function (s) { applySettings({ paragraphSpacing: s }); };
@@ -4252,14 +5160,14 @@ html, body {
       const segments = await getSectionTTSSegmentsFromBook(sectionIndex, count);
       postToRN('sectionTTSSegments', { requestId: requestId || null, segments });
     };
-    window.doGetChapterParagraphs = function () {
-      handleGetChapterParagraphs();
+    window.doGetChapterParagraphs = function (sectionIndex) {
+      handleGetChapterParagraphs(sectionIndex);
     };
-    window.doInjectChapterTranslations = function (results, visibility) {
-      return handleInjectChapterTranslations(results, visibility);
+    window.doInjectChapterTranslations = function (results, visibility, sectionIndex) {
+      return handleInjectChapterTranslations(results, visibility, sectionIndex);
     };
-    window.doRemoveChapterTranslations = function () {
-      handleRemoveChapterTranslations();
+    window.doRemoveChapterTranslations = function (sectionIndex) {
+      handleRemoveChapterTranslations(sectionIndex);
     };
 
     // ─── Polyfills ───
@@ -4498,7 +5406,7 @@ html, body {
 
     // ─── Chapter Translation Handlers ───
 
-    function handleGetChapterParagraphs() {
+    function handleGetChapterParagraphs(requestedSectionIndex) {
       // Retry with exponential backoff to handle timing issues when renderer is not ready
       var maxRetries = 3;
       var retryDelay = 300; // ms
@@ -4527,12 +5435,14 @@ html, body {
             return;
           }
 
-          // Extract document from view.renderer.getContents()
+          // Resolve the document for the REQUESTED section — never blindly
+          // use contents[0], which is often a preloaded neighbor section.
+          var resolvedIndex = null;
           var doc = null;
-          var renderer = view.renderer;
-          var contents = renderer.getContents();
-          if (contents[0] && contents[0].doc) {
-            doc = contents[0].doc;
+          var indexed = getRendererContentForSection(requestedSectionIndex);
+          if (indexed && indexed.doc) {
+            doc = indexed.doc;
+            resolvedIndex = indexed.index;
           }
 
           // Fallback: scan iframes if renderer document not available
@@ -4592,7 +5502,7 @@ html, body {
             return;
           }
 
-          postToRN('chapterParagraphs', { paragraphs: paragraphs });
+          postToRN('chapterParagraphs', { paragraphs: paragraphs, sectionIndex: resolvedIndex });
         } catch (err) {
           if (attempt < maxRetries) {
             setTimeout(tryExtract, retryDelay * attempt);
@@ -4651,16 +5561,14 @@ html, body {
       });
     }
 
-    async function handleInjectChapterTranslations(results, visibility) {
+    async function handleInjectChapterTranslations(results, visibility, sectionIndex) {
       try {
         visibility = visibility || { originalVisible: true, translationVisible: true };
         var doc = null;
-        var renderer = view && view.renderer;
-        if (renderer && renderer.getContents) {
-          var contents = renderer.getContents();
-          if (contents && contents.length && contents[0] && contents[0].doc) {
-            doc = contents[0].doc;
-          }
+        // Inject into the SAME section the paragraphs were extracted from.
+        var indexed = getRendererContentForSection(sectionIndex);
+        if (indexed && indexed.doc) {
+          doc = indexed.doc;
         }
         if (!doc) {
           var iframes = document.querySelectorAll('iframe');
@@ -4725,15 +5633,21 @@ html, body {
       }
     }
 
-    function handleRemoveChapterTranslations() {
+    function handleRemoveChapterTranslations(sectionIndex) {
       try {
+        // Sweep every loaded document so stale translations in preloaded
+        // neighbor sections are removed as well.
+        var docs = [];
+        var contents = getRendererContents();
+        for (var ci = 0; ci < contents.length; ci++) {
+          if (contents[ci] && contents[ci].doc) docs.push(contents[ci].doc);
+        }
         var doc = null;
-        var renderer = view && view.renderer;
-        if (renderer && renderer.getContents) {
-          var contents = renderer.getContents();
-          if (contents && contents.length && contents[0] && contents[0].doc) {
-            doc = contents[0].doc;
-          }
+        var indexed = getRendererContentForSection(sectionIndex);
+        if (indexed && indexed.doc) {
+          doc = indexed.doc;
+        } else if (docs.length) {
+          doc = docs[0];
         }
         if (!doc) {
           var iframes = document.querySelectorAll('iframe');
@@ -4746,12 +5660,26 @@ html, body {
         }
         if (!doc) return;
 
-        var elements = doc.querySelectorAll('.readany-translation');
-        for (var i = 0; i < elements.length; i++) {
-          elements[i].remove();
+        // Remove from the target doc plus every other loaded doc, so no
+        // stale translation survives in preloaded neighbor sections.
+        var sweepDocs = docs.length ? docs : [doc];
+        if (sweepDocs.indexOf(doc) === -1) sweepDocs.push(doc);
+        for (var di = 0; di < sweepDocs.length; di++) {
+          var sweepDoc = sweepDocs[di];
+          try {
+            var elements = sweepDoc.querySelectorAll('.readany-translation');
+            for (var i = 0; i < elements.length; i++) {
+              elements[i].remove();
+            }
+            var style = sweepDoc.getElementById('readany-chapter-translation-style');
+            if (style) style.remove();
+            var tagged = sweepDoc.querySelectorAll('[data-translate-id]');
+            for (var ti = 0; ti < tagged.length; ti++) {
+              tagged[ti].removeAttribute('data-translate-id');
+              tagged[ti].removeAttribute('data-original-hidden');
+            }
+          } catch (e) {}
         }
-        var style = doc.getElementById('readany-chapter-translation-style');
-        if (style) style.remove();
       } catch (err) {
         console.error('[WebView] Error removing translations:', err);
       }

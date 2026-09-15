@@ -1,0 +1,3 @@
+# Pastikan shell script selalu LF agar hook EAS tidak gagal
+# (CRLF membuat `set -euo pipefail` error: `pipefail\r: invalid option name`)
+*.sh text eol=lf

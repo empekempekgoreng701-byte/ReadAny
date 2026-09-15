@@ -355,6 +355,7 @@ export interface TTSState {
   totalChunks: number;
   sleepTimerEndsAt: number | null;
   sleepTimerDurationMinutes: number | null;
+  sleepTimerPauseInsteadOfStop: boolean;
 
   play: (text: string | string[]) => void;
   append: (text: string | string[]) => boolean;
@@ -369,7 +370,7 @@ export interface TTSState {
   setCurrentLocation: (cfi?: string | null) => void;
   setChunkProgress: (index: number, total: number) => void;
   jumpToChunk: (index: number) => void;
-  setSleepTimer: (minutes: number) => void;
+  setSleepTimer: (minutes: number, pauseInsteadOfStop?: boolean) => void;
   clearSleepTimer: () => void;
 }
 
@@ -391,6 +392,7 @@ export const useTTSStore = create<TTSState>()(
       totalChunks: 0,
       sleepTimerEndsAt: null,
       sleepTimerDurationMinutes: null,
+      sleepTimerPauseInsteadOfStop: false,
 
       play: (text: string | string[]) => {
         clearRespeakTimer();
@@ -527,6 +529,7 @@ export const useTTSStore = create<TTSState>()(
           currentLocationCfi: "",
           sleepTimerEndsAt: null,
           sleepTimerDurationMinutes: null,
+          // Keep sleepTimerPauseInsteadOfStop: it's a preference, not session state.
         });
       },
 
@@ -631,22 +634,31 @@ export const useTTSStore = create<TTSState>()(
         startPlayback(remainingSegments, config, index, set, get);
       },
 
-      setSleepTimer: (minutes: number) => {
+      setSleepTimer: (minutes: number, pauseInsteadOfStop?: boolean) => {
         const durationMinutes = Math.max(1, Math.round(minutes));
         const endsAt = Date.now() + durationMinutes * 60_000;
         clearSleepTimerHandle();
         _sleepTimerHandle = setTimeout(() => {
           _sleepTimerHandle = null;
           if (get().sleepTimerEndsAt !== endsAt) return;
+          const shouldPause = pauseInsteadOfStop ?? get().sleepTimerPauseInsteadOfStop;
           set({
             sleepTimerEndsAt: null,
             sleepTimerDurationMinutes: null,
           });
-          get().pause();
+          // Moon Reader: auto-pause keeps position (resume anytime),
+          // stop clears the session.
+          if (shouldPause) {
+            get().pause();
+          } else {
+            get().stop();
+          }
         }, durationMinutes * 60_000);
         set({
           sleepTimerEndsAt: endsAt,
           sleepTimerDurationMinutes: durationMinutes,
+          sleepTimerPauseInsteadOfStop:
+            pauseInsteadOfStop ?? get().sleepTimerPauseInsteadOfStop,
         });
       },
 

@@ -98,6 +98,26 @@ export const makeStyles = (colors: ThemeColors, cardWidth: number) => {
       borderRadius: radius.sm, paddingHorizontal: 4, paddingVertical: 2,
     },
     vecBadgeText: { fontSize: 7, fontWeight: fontWeight.medium, color: "#fff" },
+    favBadge: {
+      position: "absolute", top: 2, right: 2,
+      backgroundColor: "rgba(0,0,0,0.55)",
+      borderRadius: radius.full, width: 22, height: 22,
+      alignItems: "center", justifyContent: "center", zIndex: 15,
+    },
+    favBadgeText: { fontSize: 12, color: "#FFD54A", lineHeight: 14 },
+    titleRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 2,
+    },
+    menuButtonInline: {
+      width: 32,
+      height: 32,
+      borderRadius: radius.md,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    // Legacy overlay button (dipakai GroupCard) — dipertahankan agar tidak rusak
     moreButtonWrap: {
       position: "absolute",
       right: 6,
@@ -105,8 +125,8 @@ export const makeStyles = (colors: ThemeColors, cardWidth: number) => {
       zIndex: 22,
     },
     moreButton: {
-      width: 28,
-      height: 28,
+      width: 32,
+      height: 32,
       borderRadius: radius.md,
       alignItems: "center",
       justifyContent: "center",

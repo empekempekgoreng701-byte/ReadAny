@@ -52,6 +52,11 @@ const SUPPORTED_EXTS = new Set([
   "txt",
   "umd",
   "cbz",
+  "docx",
+  "html",
+  "htm",
+  "md",
+  "markdown",
 ]);
 
 export function HomePage() {

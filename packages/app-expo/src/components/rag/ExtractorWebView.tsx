@@ -16,6 +16,9 @@ const EXTRACTOR_EXTENSIONS_BY_MIME: Record<string, string> = {
   "application/x-fictionbook+xml": "fb2",
   "application/x-zip-compressed-fb2": "fbz",
   "text/plain": "txt",
+  "text/html": "html",
+  "text/markdown": "md",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
 };
 
 function getExtractorFileName(mimeType: string) {

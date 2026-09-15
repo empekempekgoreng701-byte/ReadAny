@@ -75,6 +75,45 @@ export interface ReaderBridgeCallbacks {
   onTap?: () => void;
   onSearchResult?: (index: number, count: number) => void;
   onSearchComplete?: (count: number) => void;
+  onSearchResultsList?: (detail: {
+    results: Array<{
+      sectionIndex: number;
+      blockIndex: number;
+      blockOffset: number;
+      excerpt: { pre: string; match: string; post: string };
+    }>;
+    totalCount: number;
+    truncated: boolean;
+  }) => void;
+  onSearchCacheProgress?: (progress: number) => void;
+  onAutoScrollState?: (detail: { active: boolean; speedPxPerSec: number }) => void;
+  onSpeedReadState?: (detail: { active: boolean; wpm: number; chunkSize: number }) => void;
+  onSpeedReadProgress?: (detail: { index: number; total: number; sectionIndex: number }) => void;
+  onImageGallery?: (detail: {
+    items: Array<{
+      sectionIndex: number;
+      imgIndex: number;
+      alt: string;
+      width: number;
+      height: number;
+      cfi: string | null;
+    }>;
+  }) => void;
+  onImageGalleryProgress?: (progress: number) => void;
+  onImageData?: (detail: {
+    sectionIndex: number;
+    imgIndex: number;
+    dataUrl?: string;
+    width: number;
+    height: number;
+    error?: string;
+  }) => void;
+  onImageTap?: (detail: {
+    src: string;
+    alt: string;
+    sectionIndex: number;
+    imgIndexInSection: number;
+  }) => void;
   onError?: (message: string) => void;
   onReady?: () => void;
   onLoaded?: () => void;
@@ -206,8 +245,8 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
   );
 
   const search = useCallback(
-    (query: string) => {
-      inject(`window.search(${JSON.stringify(query)})`);
+    (query: string, opts?: { matchCase?: boolean; wholeWord?: boolean }) => {
+      inject(`window.search(${JSON.stringify(query)}, ${JSON.stringify(opts ?? {})})`);
     },
     [inject],
   );
@@ -219,6 +258,81 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
   const navigateSearch = useCallback(
     (index: number) => {
       inject(`window.navigateSearch(${index})`);
+    },
+    [inject],
+  );
+
+  const goToSearchMatch = useCallback(
+    (sectionIndex: number, blockIndex: number, blockOffset: number) => {
+      inject(`window.goToSearchMatch(${sectionIndex}, ${blockIndex}, ${blockOffset})`);
+    },
+    [inject],
+  );
+
+  const ensureBookTextCache = useCallback(() => {
+    inject("window.ensureBookTextCache()");
+  }, [inject]);
+
+  const setAutoScroll = useCallback(
+    (active: boolean, speedPxPerSec?: number) => {
+      inject(`window.setAutoScroll(${active ? "true" : "false"}, ${Number(speedPxPerSec) || 0})`);
+    },
+    [inject],
+  );
+
+  const setSpeedRead = useCallback(
+    (active: boolean, wpm?: number, chunkSize?: number) => {
+      inject(
+        `window.setSpeedRead(${active ? "true" : "false"}, ${Number(wpm) || 0}, ${Number(chunkSize) || 0})`,
+      );
+    },
+    [inject],
+  );
+
+  const setBrightness = useCallback(
+    (value: number) => {
+      inject(`window.setBrightnessValue(${Number(value) || 0})`);
+    },
+    [inject],
+  );
+
+  const setEyeCare = useCallback(
+    (active: boolean) => {
+      inject(`window.setEyeCare(${active ? "true" : "false"})`);
+    },
+    [inject],
+  );
+
+  const setReadingRuler = useCallback(
+    (active: boolean) => {
+      inject(`window.setReadingRuler(${active ? "true" : "false"})`);
+    },
+    [inject],
+  );
+
+  const setBackgroundPreset = useCallback(
+    (preset: string) => {
+      inject(`window.setBackgroundPreset(${JSON.stringify(preset)})`);
+    },
+    [inject],
+  );
+
+  const requestImageGallery = useCallback(() => {
+    inject("window.requestImageGallery()");
+  }, [inject]);
+
+  const requestImageData = useCallback(
+    (sectionIndex: number, imgIndex: number, maxDim?: number) => {
+      inject(
+        `window.requestImageData(${sectionIndex}, ${imgIndex}, ${Number(maxDim) || 0})`,
+      );
+    },
+    [inject],
+  );
+
+  const goToImageLocation = useCallback(
+    (sectionIndex: number, imgIndex: number) => {
+      inject(`window.goToImageLocation(${sectionIndex}, ${imgIndex})`);
     },
     [inject],
   );
@@ -579,15 +693,18 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
     [inject],
   );
 
-  const getChapterParagraphs = useCallback(() => {
+  const getChapterParagraphs = useCallback((sectionIndex?: number) => {
     return new Promise<Array<{ id: string; text: string; tagName: string }>>((resolve) => {
       pendingChapterParagraphsResolveRef.current = resolve;
+      // Pass "undefined" (not null — Number(null) === 0 would match section 0)
+      // so the WebView falls back to the primary rendered section.
+      const indexArg = typeof sectionIndex === "number" ? String(sectionIndex) : "undefined";
 
       webViewRef.current?.injectJavaScript(`
         (function() {
           try {
             if (window.doGetChapterParagraphs) {
-              window.doGetChapterParagraphs();
+              window.doGetChapterParagraphs(${indexArg});
             } else {
               window.ReactNativeWebView.postMessage(JSON.stringify({type:'chapterParagraphs',paragraphs:[],error:'doGetChapterParagraphs not defined'}));
             }
@@ -612,6 +729,7 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
     (
       results: Array<{ paragraphId: string; originalText: string; translatedText: string }>,
       visibility = { originalVisible: true, translationVisible: true },
+      sectionIndex?: number,
     ) => {
       return new Promise<void>((resolve) => {
         const requestId = createRequestId("chapter-translation-inject");
@@ -619,6 +737,7 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
 
         const payload = JSON.stringify(results);
         const visibilityPayload = JSON.stringify(visibility);
+        const indexArg = typeof sectionIndex === "number" ? String(sectionIndex) : "undefined";
         webViewRef.current?.injectJavaScript(`
           (function() {
             var requestId = ${JSON.stringify(requestId)};
@@ -633,7 +752,7 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
             };
             try {
               if (window.doInjectChapterTranslations) {
-                Promise.resolve(window.doInjectChapterTranslations(${payload}, ${visibilityPayload}))
+                Promise.resolve(window.doInjectChapterTranslations(${payload}, ${visibilityPayload}, ${indexArg}))
                   .then(function() { done(null); })
                   .catch(function(e) { done(String(e)); });
               } else {
@@ -659,12 +778,13 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
     [createRequestId],
   );
 
-  const removeChapterTranslations = useCallback(() => {
+  const removeChapterTranslations = useCallback((sectionIndex?: number) => {
+    const indexArg = typeof sectionIndex === "number" ? String(sectionIndex) : "undefined";
     webViewRef.current?.injectJavaScript(`
       (function() {
         try {
           if (window.doRemoveChapterTranslations) {
-            window.doRemoveChapterTranslations();
+            window.doRemoveChapterTranslations(${indexArg});
           }
         } catch(e) { console.error('[WebView] removeChapterTranslations error:', e); }
       })();
@@ -750,6 +870,62 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
             break;
           case "searchComplete":
             cb.onSearchComplete?.(msg.count || 0);
+            break;
+          case "searchResultsList":
+            cb.onSearchResultsList?.({
+              results: Array.isArray(msg.results) ? msg.results : [],
+              totalCount: Number(msg.totalCount) || 0,
+              truncated: !!msg.truncated,
+            });
+            break;
+          case "searchCacheProgress":
+            cb.onSearchCacheProgress?.(Number(msg.progress) || 0);
+            break;
+          case "autoScrollState":
+            cb.onAutoScrollState?.({
+              active: !!msg.active,
+              speedPxPerSec: Number(msg.speedPxPerSec) || 0,
+            });
+            break;
+          case "speedReadState":
+            cb.onSpeedReadState?.({
+              active: !!msg.active,
+              wpm: Number(msg.wpm) || 0,
+              chunkSize: Number(msg.chunkSize) || 0,
+            });
+            break;
+          case "speedReadProgress":
+            cb.onSpeedReadProgress?.({
+              index: Number(msg.index) || 0,
+              total: Number(msg.total) || 0,
+              sectionIndex: Number(msg.sectionIndex) || 0,
+            });
+            break;
+          case "imageGallery":
+            cb.onImageGallery?.({
+              items: Array.isArray(msg.items) ? msg.items : [],
+            });
+            break;
+          case "imageGalleryProgress":
+            cb.onImageGalleryProgress?.(Number(msg.progress) || 0);
+            break;
+          case "imageData":
+            cb.onImageData?.({
+              sectionIndex: Number(msg.sectionIndex) || 0,
+              imgIndex: Number(msg.imgIndex) || 0,
+              dataUrl: typeof msg.dataUrl === "string" ? msg.dataUrl : undefined,
+              width: Number(msg.width) || 0,
+              height: Number(msg.height) || 0,
+              error: typeof msg.error === "string" ? msg.error : undefined,
+            });
+            break;
+          case "imageTap":
+            cb.onImageTap?.({
+              src: String(msg.src || ""),
+              alt: String(msg.alt || ""),
+              sectionIndex: Number(msg.sectionIndex) || 0,
+              imgIndexInSection: Number(msg.imgIndexInSection ?? msg.imgIndex) || 0,
+            });
             break;
           case "error":
             console.error("[ReaderBridge] Error from WebView:", msg.message);
@@ -893,6 +1069,7 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
               JSON.stringify({
                 count: msg.paragraphs?.length || 0,
                 error: msg.error || "none",
+                sectionIndex: msg.sectionIndex ?? "unknown",
               }),
             );
             if (pendingChapterParagraphsResolveRef.current) {
@@ -956,6 +1133,17 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
       search,
       clearSearch,
       navigateSearch,
+      goToSearchMatch,
+      ensureBookTextCache,
+      setAutoScroll,
+      setSpeedRead,
+      setBrightness,
+      setEyeCare,
+      setReadingRuler,
+      setBackgroundPreset,
+      requestImageGallery,
+      requestImageData,
+      goToImageLocation,
       addAnnotation,
       removeAnnotation,
       highlightCFITemporarily,
@@ -992,6 +1180,17 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
       search,
       clearSearch,
       navigateSearch,
+      goToSearchMatch,
+      ensureBookTextCache,
+      setAutoScroll,
+      setSpeedRead,
+      setBrightness,
+      setEyeCare,
+      setReadingRuler,
+      setBackgroundPreset,
+      requestImageGallery,
+      requestImageData,
+      goToImageLocation,
       addAnnotation,
       removeAnnotation,
       highlightCFITemporarily,

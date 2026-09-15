@@ -5,6 +5,7 @@ import { type ExtractorRef, ExtractorWebView } from "@/components/rag/ExtractorW
 import {
   ArrowDownAZIcon,
   ArrowUpAZIcon,
+  BarChart3Icon,
   CheckCheckIcon,
   ChevronLeftIcon,
   ClockIcon,
@@ -26,7 +27,7 @@ import { setCallback, setExtractorRef } from "@/lib/rag/auto-vectorize-service";
 import type { RootStackParamList } from "@/navigation/RootNavigator";
 import { WebDavConnectSheet } from "@/screens/library/WebDavConnectSheet";
 import { WebDavImportSourceSheet } from "@/screens/library/WebDavImportSourceSheet";
-import { useLibraryStore } from "@/stores/library-store";
+import { FAVORITE_TAG, useLibraryStore } from "@/stores/library-store";
 import {
   type ThemeColors,
   fontSize,
@@ -290,6 +291,9 @@ export function LibraryScreen() {
           fb2: "application/x-fictionbook+xml",
           fbz: "application/x-zip-compressed-fb2",
           txt: "text/plain",
+          docx: "application/epub+zip",
+          html: "application/epub+zip",
+          md: "application/epub+zip",
         };
         return extractorRef.current.extractChapters(
           bytesToBase64(bytes),
@@ -313,10 +317,22 @@ export function LibraryScreen() {
     return onLibraryChanged((deletedTags) => loadBooks(deletedTags));
   }, [loadBooks]);
 
+  const FAVORITE_FILTER = "__favorites__";
+  // Continue Reading: 5 buku terakhir dibuka (ala Moon Reader recent shelf)
+  const recentBooks = useMemo(
+    () =>
+      [...books]
+        .filter((b) => b.lastOpenedAt)
+        .sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0))
+        .slice(0, 5),
+    [books],
+  );
   const filteredBooks = useMemo(() => {
     let result = [...books];
     if (activeTag === "__uncategorized__") {
       result = result.filter((b) => b.tags.length === 0);
+    } else if (activeTag === FAVORITE_FILTER) {
+      result = result.filter((b) => b.tags.includes(FAVORITE_TAG));
     } else if (activeTag) {
       result = result.filter((b) => b.tags.includes(activeTag));
     }
@@ -405,6 +421,9 @@ export function LibraryScreen() {
           "application/vnd.comicbook+zip",
           "application/x-fictionbook+xml",
           "text/plain",
+          "text/html",
+          "text/markdown",
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
           "application/octet-stream",
         ],
         multiple: true,
@@ -597,6 +616,23 @@ export function LibraryScreen() {
     },
     [filter, setFilter],
   );
+
+  // Sort cycle: 1 tap pindah ke opsi sort berikut (ala Moon Reader, tanpa dropdown)
+  const SORT_CYCLE: { field: SortField; labelKey: string }[] = [
+    { field: "lastOpenedAt", labelKey: "library.sortRecent" },
+    { field: "addedAt", labelKey: "library.sortAdded" },
+    { field: "title", labelKey: "library.sortTitle" },
+    { field: "author", labelKey: "library.sortAuthor" },
+    { field: "progress", labelKey: "library.sortProgress" },
+  ];
+  const cycleSort = useCallback(() => {
+    const idx = SORT_CYCLE.findIndex((o) => o.field === filter.sortField);
+    const next = SORT_CYCLE[(idx + 1) % SORT_CYCLE.length];
+    setFilter({
+      sortField: next.field,
+      sortOrder: next.field === "title" || next.field === "author" ? "asc" : "desc",
+    });
+  }, [filter.sortField, setFilter]);
 
   const isEmpty = gridItems.length === 0;
   const hasBooks = books.length > 0;
@@ -849,7 +885,14 @@ export function LibraryScreen() {
                 </Text>
               </View>
               <View style={s.headerActions}>
-                <SyncButton size={18} color={colors.mutedForeground} />
+                <SyncButton size={20} color={colors.mutedForeground} />
+                <TouchableOpacity
+                  style={s.headerBtn}
+                  onPress={() => nav.navigate("Stats")}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <BarChart3Icon size={20} color={colors.mutedForeground} />
+                </TouchableOpacity>
                 {hasBooks && (
                   <TouchableOpacity
                     style={s.headerBtn}
@@ -862,16 +905,22 @@ export function LibraryScreen() {
                       }
                     }}
                     activeOpacity={0.7}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   >
                     <SearchIcon
-                      size={18}
+                      size={20}
                       color={showSearch ? colors.primary : colors.mutedForeground}
                     />
                   </TouchableOpacity>
                 )}
                 {hasBooks && (
-                  <TouchableOpacity style={s.headerBtn} onPress={() => setShowSort(!showSort)}>
-                    <SortAscIcon size={18} color={colors.mutedForeground} />
+                  <TouchableOpacity
+                    style={s.headerBtn}
+                    onPress={cycleSort}
+                    onLongPress={() => setShowSort(true)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <SortAscIcon size={20} color={colors.mutedForeground} />
                   </TouchableOpacity>
                 )}
                 {hasBooks && (
@@ -881,9 +930,10 @@ export function LibraryScreen() {
                       setActiveGroupId("");
                       setGroupView(!isGroupView);
                     }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   >
                     <LayersIcon
-                      size={18}
+                      size={20}
                       color={isGroupView ? colors.primary : colors.mutedForeground}
                     />
                   </TouchableOpacity>
@@ -953,7 +1003,7 @@ export function LibraryScreen() {
                   )}
                 </Animated.View>
               )}
-              {allTags.length > 0 && (
+              {(allTags.length > 0 || books.some((b) => b.tags.includes(FAVORITE_TAG))) && (
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
@@ -963,6 +1013,7 @@ export function LibraryScreen() {
                   <TouchableOpacity
                     style={[s.tagChip, !activeTag && !activeGroupId && s.tagChipActive]}
                     onPress={() => setActiveTag("")}
+                    hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
                   >
                     <Text
                       style={[s.tagChipText, !activeTag && !activeGroupId && s.tagChipTextActive]}
@@ -970,17 +1021,32 @@ export function LibraryScreen() {
                       {t("library.all", "全部")}
                     </Text>
                   </TouchableOpacity>
-                  {allTags.map((tag) => (
-                    <TouchableOpacity
-                      key={tag}
-                      style={[s.tagChip, activeTag === tag && s.tagChipActive]}
-                      onPress={() => setActiveTag(activeTag === tag ? "" : tag)}
+                  {/* Favorite filter chip — Moon Reader star shelf */}
+                  <TouchableOpacity
+                    style={[s.tagChip, activeTag === FAVORITE_FILTER && s.tagChipActive]}
+                    onPress={() => setActiveTag(activeTag === FAVORITE_FILTER ? "" : FAVORITE_FILTER)}
+                    hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+                  >
+                    <Text
+                      style={[s.tagChipText, activeTag === FAVORITE_FILTER && s.tagChipTextActive]}
                     >
-                      <Text style={[s.tagChipText, activeTag === tag && s.tagChipTextActive]}>
-                        {tag}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
+                      ★ {t("library.favorites", "收藏")}
+                    </Text>
+                  </TouchableOpacity>
+                  {allTags
+                    .filter((tag) => tag !== FAVORITE_TAG)
+                    .map((tag) => (
+                      <TouchableOpacity
+                        key={tag}
+                        style={[s.tagChip, activeTag === tag && s.tagChipActive]}
+                        onPress={() => setActiveTag(activeTag === tag ? "" : tag)}
+                        hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+                      >
+                        <Text style={[s.tagChipText, activeTag === tag && s.tagChipTextActive]}>
+                          {tag}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
                   <TouchableOpacity
                     style={[s.tagChip, activeTag === "__uncategorized__" && s.tagChipActive]}
                     onPress={() =>
@@ -1078,6 +1144,42 @@ export function LibraryScreen() {
               {t("library.resultsCount", { count: gridItems.length })}
             </Text>
           )}
+          {/* Continue Reading shelf — Moon Reader recent books, 1 tap buka */}
+          {isLoaded &&
+            !isEmpty &&
+            !hasSearch &&
+            !activeTag &&
+            !activeGroupId &&
+            recentBooks.length > 0 && (
+              <View>
+                <Text style={s.shelfTitle}>{t("library.continueReading", "继续阅读")}</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={s.shelfContent}
+                >
+                  {recentBooks.map((book) => (
+                    <View key={book.id} style={s.shelfItem}>
+                      <BookCard
+                        book={book}
+                        cardWidth={Math.min(110, gridItemWidth)}
+                        onOpen={handleOpen}
+                        onDelete={removeBook}
+                        onShowDetails={handleShowDetails}
+                        onManageTags={handleManageTags}
+                        onVectorize={handleVectorize}
+                        isVectorizing={vectorizingBookId === book.id}
+                        isQueued={vectorQueue.some((b) => b.id === book.id)}
+                        vectorProgress={vectorizingBookId === book.id ? vectorProgress : null}
+                        downloadProgress={downloadingBookId === book.id ? downloadProgress : null}
+                        isSelectionMode={false}
+                        isSelected={false}
+                      />
+                    </View>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
           {isLoaded && !isEmpty && (
             <FlatList
               data={gridItems}
@@ -1215,12 +1317,21 @@ const makeStyles = (
     },
     headerActions: { flexDirection: "row", alignItems: "center", gap: 4 },
     headerBtn: {
-      width: 36,
-      height: 36,
+      width: 44,
+      height: 44,
       borderRadius: radius.full,
       alignItems: "center",
       justifyContent: "center",
     },
+    shelfTitle: {
+      fontSize: fontSize.base,
+      fontWeight: fontWeight.semibold,
+      color: colors.foreground,
+      marginBottom: 8,
+      marginTop: 2,
+    },
+    shelfContent: { gap: 12, paddingRight: 8, paddingBottom: 4 },
+    shelfItem: { width: 110 },
     importBtn: {
       width: 36,
       height: 36,
@@ -1238,9 +1349,9 @@ const makeStyles = (
     searchInputContainer: {
       flexDirection: "row",
       alignItems: "center",
-      height: 36,
-      paddingHorizontal: 10,
-      gap: 6,
+      height: 44,
+      paddingHorizontal: 14,
+      gap: 8,
       borderRadius: radius.full,
       backgroundColor: colors.muted,
     },
@@ -1249,26 +1360,28 @@ const makeStyles = (
     },
     searchInput: {
       flex: 1,
-      fontSize: fontSize.sm,
+      fontSize: fontSize.base,
       color: colors.foreground,
       padding: 0,
       minWidth: 0,
     },
     searchClearBtn: {
-      width: 22,
-      height: 22,
-      borderRadius: 11,
+      width: 32,
+      height: 32,
+      borderRadius: 16,
       alignItems: "center",
       justifyContent: "center",
     },
     tagScroll: { marginBottom: 4 },
     tagScrollWide: { flex: 1, minWidth: 0, marginBottom: 0 },
-    tagScrollContent: { gap: 6, paddingRight: 8 },
+    tagScrollContent: { gap: 8, paddingRight: 8, paddingVertical: 4 },
     tagChip: {
-      paddingHorizontal: 12,
-      paddingVertical: 5,
+      paddingHorizontal: 16,
+      paddingVertical: 9,
       borderRadius: radius.full,
       backgroundColor: colors.muted,
+      minHeight: 38,
+      justifyContent: "center",
     },
     tagChipActive: { backgroundColor: colors.primary },
     tagChipText: {
@@ -1297,10 +1410,11 @@ const makeStyles = (
     sortItem: {
       flexDirection: "row",
       alignItems: "center",
-      gap: 8,
-      paddingHorizontal: 12,
-      paddingVertical: 8,
+      gap: 10,
+      paddingHorizontal: 14,
+      paddingVertical: 13,
       borderRadius: radius.lg,
+      minHeight: 48,
     },
     sortItemActive: { backgroundColor: colors.muted },
     sortText: { fontSize: fontSize.xs, color: colors.foreground },

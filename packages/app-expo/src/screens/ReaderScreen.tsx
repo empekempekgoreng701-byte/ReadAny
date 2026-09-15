@@ -13,8 +13,14 @@ import {
   ChevronRightIcon,
   HeadphonesIcon,
   LanguagesIcon,
+  MinusIcon,
   NotebookPenIcon,
+  PaletteIcon,
+  PauseIcon,
+  PlayIcon,
+  PlusIcon,
   SearchIcon,
+  SparklesIcon,
   XIcon,
 } from "@/components/ui/Icon";
 import { SyncButton } from "@/components/ui/SyncButton";
@@ -59,6 +65,7 @@ import {
   AppState,
   type AppStateStatus,
   Easing,
+  FlatList,
   Modal,
   Platform,
   Pressable,
@@ -90,6 +97,9 @@ const BOOK_MIME_TYPES = [
   "application/vnd.comicbook+zip",
   "application/x-fictionbook+xml",
   "text/plain",
+  "text/html",
+  "text/markdown",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/octet-stream",
 ];
 
@@ -104,6 +114,11 @@ const BOOK_FORMAT_MIME_TYPES: Partial<Record<string, string>> = {
   fb2: "application/x-fictionbook+xml",
   fbz: "application/x-zip-compressed-fb2",
   txt: "text/plain",
+  // Converted at import time and stored as EPUB bytes (same as TXT/UMD):
+  // reader must receive EPUB mime so foliate routes to the EPUB engine.
+  docx: "application/epub+zip",
+  html: "application/epub+zip",
+  md: "application/epub+zip",
 };
 
 function normalizeBookIdentityText(value?: string): string {
@@ -147,6 +162,7 @@ const NOTE_TOOLTIP_ABOVE_OFFSET = 2;
 const NOTE_TOOLTIP_BELOW_OFFSET = 8;
 const NOTE_TOOLTIP_TOP_THRESHOLD = 180;
 import { useRubyStore } from "@readany/core/stores/ruby-store";
+import { ImageFullscreenViewer } from "./reader/ReaderImageGallery";
 import { ReaderSettingsPanel } from "./reader/ReaderSettingsPanel";
 import { ReaderTOCPanel } from "./reader/ReaderTOCPanel";
 import {
@@ -220,7 +236,7 @@ export function ReaderScreen({ route, navigation }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [showControls, setShowControls] = useState(false);
   const [showTOC, setShowTOC] = useState(false);
-  const [tocActiveTab, setTocActiveTab] = useState<"toc" | "bookmarks">("toc");
+  const [tocActiveTab, setTocActiveTab] = useState<"toc" | "bookmarks" | "images">("toc");
   const [showSettings, setShowSettings] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [showNotebook, setShowNotebook] = useState(false);
@@ -228,6 +244,125 @@ export function ReaderScreen({ route, navigation }: Props) {
   const [translationText, setTranslationText] = useState("");
   const [showTTS, setShowTTS] = useState(false);
   const [showChapterTranslation, setShowChapterTranslation] = useState(false);
+  // Auto-scroll state (speed in px/sec; persisted per session only)
+  const [autoScrollActive, setAutoScrollActive] = useState(false);
+  const [autoScrollSpeed, setAutoScrollSpeed] = useState(50);
+  const autoScrollSpeedRef = useRef(50);
+  autoScrollSpeedRef.current = autoScrollSpeed;
+  const autoScrollActiveRef = useRef(false);
+  const setAutoScrollActiveTracked = useCallback((active: boolean) => {
+    autoScrollActiveRef.current = active;
+    setAutoScrollActive(active);
+  }, []);
+  // Speed-read RSVP state
+  const [speedReadActive, setSpeedReadActive] = useState(false);
+  const [speedReadWpm, setSpeedReadWpm] = useState(300);
+  const [speedReadChunk, setSpeedReadChunk] = useState(3);
+  const [speedReadProgress, setSpeedReadProgress] = useState<{
+    index: number;
+    total: number;
+  } | null>(null);
+  const speedReadActiveRef = useRef(false);
+  // Phase 2: brightness / eye-care / ruler / background
+  const [showPhase2, setShowPhase2] = useState(false);
+  const [brightness, setBrightness] = useState(100);
+  const [eyeCare, setEyeCare] = useState(false);
+  const [rulerOn, setRulerOn] = useState(false);
+  const [bgPreset, setBgPreset] = useState("default");
+  // Phase 7: image gallery
+  const [imageItems, setImageItems] = useState<
+    Array<{
+      sectionIndex: number;
+      imgIndex: number;
+      alt: string;
+      width: number;
+      height: number;
+      cfi: string | null;
+    }>
+  >([]);
+  const [imageProgress, setImageProgress] = useState<number | null>(null);
+  const [imageDataMap, setImageDataMap] = useState<Record<string, string>>({});
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
+  const imageDataPendingRef = useRef<Set<string>>(new Set());
+  const imageItemsRef = useRef<typeof imageItems>([]);
+  imageItemsRef.current = imageItems;
+  const viewerIndexRef = useRef<number | null>(null);
+  viewerIndexRef.current = viewerIndex;
+
+  // Phase 7: gallery helpers — lazy thumb/full + lompat lokasi
+  // Phase 11 §2-§3: imageDataMap bounded LRU (150 entries). Full-res viewer
+  // shares the same entry; it is evicted on close (see closeImageViewer).
+  const IMAGE_DATA_MAP_LIMIT = 150;
+  const putImageData = useCallback((key: string, dataUrl: string) => {
+    setImageDataMap((prev) => {
+      if (prev[key]) return prev;
+      const keys = Object.keys(prev);
+      if (keys.length < IMAGE_DATA_MAP_LIMIT) return { ...prev, [key]: dataUrl };
+      // Evict oldest-inserted first (insertion-ordered object keys)
+      const next: Record<string, string> = {};
+      const drop = keys.length - IMAGE_DATA_MAP_LIMIT + 1;
+      for (let i = drop; i < keys.length; i++) {
+        const k = keys[i];
+        const v = k !== undefined ? prev[k] : undefined;
+        if (k !== undefined && v !== undefined) next[k] = v;
+      }
+      next[key] = dataUrl;
+      return next;
+    });
+  }, []);
+  const requestGalleryThumb = useCallback(
+    (sectionIndex: number, imgIndex: number) => {
+      const key = `${sectionIndex}:${imgIndex}`;
+      if (imageDataMap[key] || imageDataPendingRef.current.has(key)) return;
+      imageDataPendingRef.current.add(key);
+      bridgeRef.current?.requestImageData(sectionIndex, imgIndex, 240);
+    },
+    [imageDataMap],
+  );
+  // Phase 11 §2: bebaskan full-res saat viewer tutup.
+  const closeImageViewer = useCallback(() => {
+    const idx = viewerIndexRef.current;
+    setViewerIndex(null);
+    if (idx != null) {
+      const item = imageItemsRef.current[idx];
+      if (item) {
+        const key = `${item.sectionIndex}:${item.imgIndex}`;
+        imageDataPendingRef.current.delete(key);
+        setImageDataMap((prev) => {
+          if (!prev[key]) return prev;
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      }
+    }
+  }, []);
+  const openGalleryTab = useCallback(() => {
+    if (imageItems.length === 0 && imageProgress == null) {
+      bridgeRef.current?.requestImageGallery();
+    }
+  }, [imageItems.length, imageProgress]);
+  const openImageViewer = useCallback(
+    (index: number) => {
+      const item = imageItems[index];
+      if (!item) return;
+      setViewerIndex(index);
+      const key = `${item.sectionIndex}:${item.imgIndex}`;
+      if (!imageDataMap[key] && !imageDataPendingRef.current.has(key)) {
+        imageDataPendingRef.current.add(key);
+        bridgeRef.current?.requestImageData(item.sectionIndex, item.imgIndex, 1600);
+      }
+    },
+    [imageItems, imageDataMap],
+  );
+  const goToGalleryImage = useCallback(
+    (sectionIndex: number, imgIndex: number) => {
+      setViewerIndex(null);
+      setShowTOC(false);
+      bridgeRef.current?.goToImageLocation(sectionIndex, imgIndex);
+    },
+    [],
+  );
   const [isReimporting, setIsReimporting] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [progress, setProgress] = useState(0);
@@ -269,9 +404,23 @@ export function ReaderScreen({ route, navigation }: Props) {
   const bridgeRef = useRef<{
     requestPageSnippet: () => void;
     goNext: () => void;
-    search: (query: string) => void;
+    search: (
+      query: string,
+      opts?: { matchCase?: boolean; wholeWord?: boolean; direction?: string },
+    ) => void;
     clearSearch: () => void;
     navigateSearch: (index: number) => void;
+    goToSearchMatch: (sectionIndex: number, blockIndex: number, blockOffset: number) => void;
+    ensureBookTextCache: () => void;
+    setAutoScroll: (active: boolean, speedPxPerSec?: number) => void;
+    setSpeedRead: (active: boolean, wpm?: number, chunkSize?: number) => void;
+    setBrightness: (value: number) => void;
+    setEyeCare: (active: boolean) => void;
+    setReadingRuler: (active: boolean) => void;
+    setBackgroundPreset: (preset: string) => void;
+    requestImageGallery: () => void;
+    requestImageData: (sectionIndex: number, imgIndex: number, maxDim?: number) => void;
+    goToImageLocation: (sectionIndex: number, imgIndex: number) => void;
     getVisibleText: () => Promise<string>;
     getVisibleTTSSegments: (alignCfi?: string | null) => Promise<TTSSegment[]>;
     getChapterParagraphs: () => Promise<Array<{ id: string; text: string; tagName: string }>>;
@@ -300,13 +449,21 @@ export function ReaderScreen({ route, navigation }: Props) {
   // Chapter translation state
   const [currentSectionIndex, setCurrentSectionIndex] = useState(0);
   const chapterTranslationBridgeRef = useRef<{
-    getChapterParagraphs: () => Promise<Array<{ id: string; text: string; tagName: string }>>;
+    getChapterParagraphs: (
+      sectionIndex?: number,
+    ) => Promise<Array<{ id: string; text: string; tagName: string }>>;
     injectChapterTranslations: (
       results: Array<{ paragraphId: string; originalText: string; translatedText: string }>,
       visibility?: { originalVisible: boolean; translationVisible: boolean },
+      sectionIndex?: number,
     ) => Promise<void>;
-    removeChapterTranslations: () => void;
+    removeChapterTranslations: (sectionIndex?: number) => void;
   } | null>(null);
+
+  // Scroll idle detection for translation restore
+  const [scrollSettled, setScrollSettled] = useState(true);
+  const scrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastRelocateTimeRef = useRef(0);
 
   const readSettings = useSettingsStore((s) => s.readSettings);
   const updateReadSettings = useSettingsStore((s) => s.updateReadSettings);
@@ -442,22 +599,34 @@ export function ReaderScreen({ route, navigation }: Props) {
     sessionProgressRef.current = null;
     totalBookCharactersRef.current = null;
     suppressProgressTracking(INITIAL_PROGRESS_RESTORE_GUARD_MS);
+    // Phase 11 §2: drop previous book's image state (thumbs + pending + viewer)
+    imageDataPendingRef.current.clear();
+    setImageDataMap({});
+    setImageItems([]);
+    setImageProgress(null);
+    setViewerIndex(null);
   }, [bookId]);
   const chapterTranslation = useChapterTranslation({
     bookId,
     sectionIndex: currentSectionIndex,
     aiConfig,
-    ready: translationReady,
+    ready: translationReady && scrollSettled,
     translationConfig,
     getParagraphs: async () => {
       if (!chapterTranslationBridgeRef.current) return [];
-      return chapterTranslationBridgeRef.current.getChapterParagraphs();
+      // Pass the section index so the WebView extracts from the chapter
+      // actually being read — not contents[0] (often a preloaded neighbor).
+      return chapterTranslationBridgeRef.current.getChapterParagraphs(currentSectionIndex);
     },
     injectTranslations: (results, visibility) => {
-      return chapterTranslationBridgeRef.current?.injectChapterTranslations(results, visibility);
+      return chapterTranslationBridgeRef.current?.injectChapterTranslations(
+        results,
+        visibility,
+        currentSectionIndex,
+      );
     },
     removeTranslations: () => {
-      chapterTranslationBridgeRef.current?.removeChapterTranslations();
+      chapterTranslationBridgeRef.current?.removeChapterTranslations(currentSectionIndex);
     },
     applyVisibility: (originalVisible, translationVisible) => {
       const translationHidden = !translationVisible;
@@ -577,6 +746,8 @@ export function ReaderScreen({ route, navigation }: Props) {
     },
     onLoaded: () => {
       setLoading(false);
+      // Prewarm whole-book text cache in background so first search is instant
+      search.ensureCache();
       const settings = useSettingsStore.getState().readSettings;
       const { fonts, selectedFontId: selId } = useFontStore.getState();
       const fontCSS = buildCustomFontFaceCSS(fonts, selId, fileServerRef.current);
@@ -633,30 +804,56 @@ export function ReaderScreen({ route, navigation }: Props) {
         routeCfi: cfi,
         lastNavigated: lastNavigatedCfiRef.current,
       });
+
+      // ── Scroll idle detection ──
+      lastRelocateTimeRef.current = Date.now();
+      if (scrollSettled) {
+        setScrollSettled(false);
+      }
+      if (scrollIdleTimerRef.current) {
+        clearTimeout(scrollIdleTimerRef.current);
+      }
+      scrollIdleTimerRef.current = setTimeout(() => {
+        setScrollSettled(true);
+      }, 500);
+
+      // ── Batch state updates to reduce re-renders ──
+      const newSection = detail.section?.current ?? 0;
+      const sectionChanged = newSection !== currentSectionIndex;
+      
+      // Calculate page numbers once
+      let newCurrentPage = currentPage;
+      let newTotalPages = totalPages;
+      if (detail.page) {
+        newCurrentPage = Math.max(1, detail.page.current);
+        newTotalPages = Math.max(1, detail.page.total);
+      } else if (detail.section?.total && !detail.location?.total) {
+        newCurrentPage = Math.max(1, detail.section.current + 1);
+        newTotalPages = Math.max(1, detail.section.total);
+      } else {
+        newCurrentPage = 0;
+        newTotalPages = 0;
+      }
+
+      // Batch all state updates into minimal calls
       if (loading) {
         setLoading(false);
       }
-      // Track section changes for chapter translation reset
-      const newSection = detail.section?.current ?? 0;
-      if (newSection !== currentSectionIndex) {
+      
+      if (sectionChanged) {
         setCurrentSectionIndex(newSection);
         setTranslationReady(false);
         chapterTranslation.reset();
       }
 
-      if (detail.fraction != null) setProgress(detail.fraction);
+      // Only update if values actually changed
+      if (detail.fraction != null && detail.fraction !== progress) {
+        setProgress(detail.fraction);
+      }
 
-      if (detail.page) {
-        setCurrentPage(Math.max(1, detail.page.current));
-        setTotalPages(Math.max(1, detail.page.total));
-      } else if (detail.section?.total && !detail.location?.total) {
-        // Fixed-layout documents can still expose stable section pages.
-        setCurrentPage(Math.max(1, detail.section.current + 1));
-        setTotalPages(Math.max(1, detail.section.total));
-      } else {
-        // Reflowable books without renderer-backed pagination should fall back to percent.
-        setCurrentPage(0);
-        setTotalPages(0);
+      if (newCurrentPage !== currentPage || newTotalPages !== totalPages) {
+        setCurrentPage(newCurrentPage);
+        setTotalPages(newTotalPages);
       }
 
       const trackingSuppressed = Date.now() < progressTrackingGuardUntilRef.current;
@@ -733,7 +930,9 @@ export function ReaderScreen({ route, navigation }: Props) {
         }
         sessionProgressRef.current = { mode: "page", current: detail.section.current };
       }
-      if (detail.tocItem?.label) setCurrentChapter(detail.tocItem.label);
+      if (detail.tocItem?.label && detail.tocItem.label !== currentChapter) {
+        setCurrentChapter(detail.tocItem.label);
+      }
       if (detail.cfi) {
         if (lastCfiRef.current && detail.cfi !== lastCfiRef.current) {
           const fractionDiff = Math.abs((detail.fraction ?? 0) - progress);
@@ -745,13 +944,18 @@ export function ReaderScreen({ route, navigation }: Props) {
           }
         }
         lastCfiRef.current = detail.cfi;
-        setCurrentCfi(detail.cfi);
+        if (detail.cfi !== currentCfi) {
+          setCurrentCfi(detail.cfi);
+        }
         // Use throttled save instead of immediate update
         throttledSaveProgress(bookId, detail.fraction ?? 0, detail.cfi);
       }
 
       // Mark translation ready after first successful relocate (CFI navigation done)
-      if (!translationReady) setTranslationReady(true);
+      // Only set once per section to avoid unnecessary re-renders
+      if (!translationReady && !sectionChanged) {
+        setTranslationReady(true);
+      }
 
       // If TTS is waiting for a page turn to complete, fire the continuation callback now
       // that the renderer has fully updated its position (renderer.start reflects new page).
@@ -811,7 +1015,53 @@ export function ReaderScreen({ route, navigation }: Props) {
         setSelection(null);
         return;
       }
+      // Tap pauses an active auto-scroll / speed-read instead of toggling controls
+      if (autoScrollActiveRef.current) {
+        bridgeRef.current?.setAutoScroll(false);
+        return;
+      }
+      if (speedReadActiveRef.current) {
+        bridgeRef.current?.setSpeedRead(false);
+        return;
+      }
       toggleControls();
+    },
+    onAutoScrollState: (detail: { active: boolean; speedPxPerSec: number }) => {
+      setAutoScrollActiveTracked(detail.active);
+    },
+    onSpeedReadState: (detail: { active: boolean; wpm: number; chunkSize: number }) => {
+      speedReadActiveRef.current = detail.active;
+      setSpeedReadActive(detail.active);
+      if (detail.wpm) setSpeedReadWpm(detail.wpm);
+      if (detail.chunkSize) setSpeedReadChunk(detail.chunkSize);
+      if (!detail.active) setSpeedReadProgress(null);
+    },
+    onSpeedReadProgress: (detail: { index: number; total: number }) => {
+      setSpeedReadProgress({ index: detail.index, total: detail.total });
+    },
+    onImageGallery: (detail) => {
+      setImageItems(detail.items);
+      setImageProgress(null);
+    },
+    onImageGalleryProgress: (progress: number) => {
+      setImageProgress(progress >= 1 ? null : progress);
+    },
+    onImageData: (detail) => {
+      if (!detail.dataUrl) return;
+      const key = `${detail.sectionIndex}:${detail.imgIndex}`;
+      imageDataPendingRef.current.delete(key);
+      putImageData(key, detail.dataUrl);
+    },
+    onImageTap: (detail) => {
+      // Tap gambar di reader → buka fullscreen viewer di gambar tsb bila ada di gallery
+      const idx = imageItemsRef.current.findIndex(
+        (it) =>
+          it.sectionIndex === detail.sectionIndex &&
+          (it.imgIndex === detail.imgIndexInSection || detail.imgIndexInSection < 0),
+      );
+      if (idx >= 0) {
+        setViewerIndex(idx);
+      }
     },
     onToggleBookmark: () => {
       handleToggleBookmark();
@@ -833,6 +1083,12 @@ export function ReaderScreen({ route, navigation }: Props) {
     },
     onSearchComplete: (count: number) => {
       search.onSearchComplete(count);
+    },
+    onSearchResultsList: (detail) => {
+      search.onSearchResultsList(detail);
+    },
+    onSearchCacheProgress: (progress: number) => {
+      search.onSearchCacheProgress(progress);
     },
     onError: (message: string) => {
       console.error("[Reader] WebView error:", message);
@@ -988,6 +1244,16 @@ export function ReaderScreen({ route, navigation }: Props) {
         customFontFaceCSS: fontCSS,
         customFontFamily: fontFamily ?? "",
       });
+      // Page/scroll mode change while auto-scroll is active: restart with correct strategy
+      if ((key === "viewMode" || key === "paginatedLayout") && autoScrollActiveRef.current) {
+        const s = autoScrollSpeedRef.current;
+        // Give renderer a tick to apply new flow mode before restarting
+        setTimeout(() => bridgeRef.current?.setAutoScroll(true, s), 180);
+      }
+      // Changing flow mode invalidates speed-read word layout — pause it
+      if ((key === "viewMode" || key === "paginatedLayout") && speedReadActiveRef.current) {
+        bridgeRef.current?.setSpeedRead(false);
+      }
     },
     [bridge, updateReadSettings, computeEffectiveFontSize],
   );
@@ -1885,6 +2151,49 @@ export function ReaderScreen({ route, navigation }: Props) {
                 <SearchIcon size={bottomDockIconSize} color={colors.foreground} />
                 <Text style={s.bottomDockLabel}>{t("reader.search", "搜索")}</Text>
               </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.bottomDockBtn, autoScrollActive && s.bottomDockBtnActive]}
+                onPress={() => {
+                  bridgeRef.current?.setAutoScroll(!autoScrollActiveRef.current, autoScrollSpeedRef.current);
+                }}
+              >
+                {autoScrollActive ? (
+                  <PauseIcon size={bottomDockIconSize} color={colors.primary} />
+                ) : (
+                  <PlayIcon size={bottomDockIconSize} color={colors.foreground} />
+                )}
+                <Text style={[s.bottomDockLabel, autoScrollActive && s.bottomDockLabelActive]}>
+                  {t("reader.autoScroll", "自动滚动")}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.bottomDockBtn, speedReadActive && s.bottomDockBtnActive]}
+                onPress={() => {
+                  if (speedReadActiveRef.current) {
+                    bridgeRef.current?.setSpeedRead(false);
+                  } else {
+                    bridgeRef.current?.setSpeedRead(true, speedReadWpm, speedReadChunk);
+                  }
+                }}
+              >
+                {speedReadActive ? (
+                  <PauseIcon size={bottomDockIconSize} color={colors.primary} />
+                ) : (
+                  <SparklesIcon size={bottomDockIconSize} color={colors.foreground} />
+                )}
+                <Text style={[s.bottomDockLabel, speedReadActive && s.bottomDockLabelActive]}>
+                  {t("reader.speedRead", "速读")}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.bottomDockBtn, showPhase2 && s.bottomDockBtnActive]}
+                onPress={() => setShowPhase2((v) => !v)}
+              >
+                <PaletteIcon size={bottomDockIconSize} color={showPhase2 ? colors.primary : colors.foreground} />
+                <Text style={[s.bottomDockLabel, showPhase2 && s.bottomDockLabelActive]}>
+                  {t("reader.display", "显示")}
+                </Text>
+              </TouchableOpacity>
               <TouchableOpacity style={s.bottomDockBtn} onPress={() => setShowSettings(true)}>
                 <SettingsIcon size={bottomDockIconSize} color={colors.foreground} />
                 <Text style={s.bottomDockLabel}>{t("common.settings", "设置")}</Text>
@@ -1892,6 +2201,230 @@ export function ReaderScreen({ route, navigation }: Props) {
             </View>
           </View>
         </Animated.View>
+      )}
+
+      {/* ─── Auto-scroll mini bar (visible whenever active) ─── */}
+      {autoScrollActive && (
+        <View
+          style={{
+            position: "absolute",
+            left: 16,
+            right: 16,
+            bottom: Math.max(insets.bottom, 8) + 76,
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "center",
+            paddingHorizontal: 12,
+            paddingVertical: 8,
+            borderRadius: 20,
+            backgroundColor: withOpacity(colors.background, 0.92),
+            borderWidth: 1,
+            borderColor: withOpacity(colors.foreground, 0.12),
+            gap: 12,
+          }}
+        >
+          <TouchableOpacity
+            onPress={() => {
+              const speeds = [25, 50, 100];
+              const idx = speeds.indexOf(autoScrollSpeed);
+              const next = speeds[(idx + 1) % speeds.length];
+              setAutoScrollSpeed(next);
+              bridgeRef.current?.setAutoScroll(true, next);
+            }}
+          >
+            <Text style={{ color: colors.primary, fontSize: 13, fontWeight: "700" }}>
+              {autoScrollSpeed === 25
+                ? t("reader.autoScrollSlow", "慢速")
+                : autoScrollSpeed === 100
+                  ? t("reader.autoScrollFast", "快速")
+                  : t("reader.autoScrollNormal", "中速")}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => {
+              const next = Math.max(10, autoScrollSpeed - 10);
+              setAutoScrollSpeed(next);
+              bridgeRef.current?.setAutoScroll(true, next);
+            }}
+          >
+            <MinusIcon size={16} color={colors.foreground} />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => bridgeRef.current?.setAutoScroll(false)}>
+            <PauseIcon size={20} color={colors.primary} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => {
+              const next = Math.min(200, autoScrollSpeed + 10);
+              setAutoScrollSpeed(next);
+              bridgeRef.current?.setAutoScroll(true, next);
+            }}
+          >
+            <PlusIcon size={16} color={colors.foreground} />
+          </TouchableOpacity>
+        </View>
+      )}
+      {/* ─── Speed-read mini bar (visible whenever active) ─── */}
+      {speedReadActive && (
+        <View
+          style={{
+            position: "absolute",
+            left: 16,
+            right: 16,
+            bottom: Math.max(insets.bottom, 8) + 112,
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "center",
+            paddingHorizontal: 12,
+            paddingVertical: 8,
+            borderRadius: 20,
+            backgroundColor: withOpacity(colors.background, 0.92),
+            borderWidth: 1,
+            borderColor: withOpacity(colors.foreground, 0.12),
+            gap: 10,
+          }}
+        >
+          <TouchableOpacity
+            onPress={() => {
+              const next = Math.max(100, speedReadWpm - 50);
+              setSpeedReadWpm(next);
+              bridgeRef.current?.setSpeedRead(true, next, speedReadChunk);
+            }}
+          >
+            <MinusIcon size={16} color={colors.foreground} />
+          </TouchableOpacity>
+          <Text style={{ color: colors.primary, fontSize: 13, fontWeight: "700" }}>
+            {speedReadWpm} WPM · {speedReadChunk} {t("reader.speedReadWords", "词")}
+            {speedReadProgress ? ` · ${speedReadProgress.index + 1}/${speedReadProgress.total}` : ""}
+          </Text>
+          <TouchableOpacity
+            onPress={() => {
+              const next = Math.min(800, speedReadWpm + 50);
+              setSpeedReadWpm(next);
+              bridgeRef.current?.setSpeedRead(true, next, speedReadChunk);
+            }}
+          >
+            <PlusIcon size={16} color={colors.foreground} />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => bridgeRef.current?.setSpeedRead(false)}>
+            <PauseIcon size={16} color={colors.primary} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => {
+              const next = speedReadChunk >= 10 ? 1 : speedReadChunk + 1;
+              setSpeedReadChunk(next);
+              bridgeRef.current?.setSpeedRead(true, speedReadWpm, next);
+            }}
+          >
+            <Text style={{ color: colors.foreground, fontSize: 12, fontWeight: "700" }}>
+              {speedReadChunk}×
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+      {/* ─── Phase 2 display panel ─── */}
+      {showPhase2 && (
+        <View
+          style={{
+            position: "absolute",
+            left: 16,
+            right: 16,
+            bottom: Math.max(insets.bottom, 8) + 148,
+            paddingHorizontal: 12,
+            paddingVertical: 10,
+            borderRadius: 16,
+            backgroundColor: withOpacity(colors.background, 0.94),
+            borderWidth: 1,
+            borderColor: withOpacity(colors.foreground, 0.12),
+            gap: 10,
+          }}
+        >
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+            <Text style={{ color: colors.foreground, fontSize: 13, fontWeight: "600" }}>
+              {t("reader.brightness", "亮度")} {brightness}%
+            </Text>
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <TouchableOpacity
+                onPress={() => {
+                  const v = Math.max(20, brightness - 10);
+                  setBrightness(v);
+                  bridgeRef.current?.setBrightness(v);
+                }}
+              >
+                <MinusIcon size={16} color={colors.foreground} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => {
+                  const v = Math.min(100, brightness + 10);
+                  setBrightness(v);
+                  bridgeRef.current?.setBrightness(v);
+                }}
+              >
+                <PlusIcon size={16} color={colors.foreground} />
+              </TouchableOpacity>
+            </View>
+          </View>
+          <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+            <TouchableOpacity
+              style={{
+                paddingHorizontal: 10,
+                paddingVertical: 6,
+                borderRadius: 12,
+                backgroundColor: eyeCare ? withOpacity(colors.primary, 0.18) : withOpacity(colors.foreground, 0.08),
+              }}
+              onPress={() => {
+                const v = !eyeCare;
+                setEyeCare(v);
+                bridgeRef.current?.setEyeCare(v);
+              }}
+            >
+              <Text style={{ color: eyeCare ? colors.primary : colors.foreground, fontSize: 12, fontWeight: "600" }}>
+                {t("reader.eyeCare", "护眼")}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={{
+                paddingHorizontal: 10,
+                paddingVertical: 6,
+                borderRadius: 12,
+                backgroundColor: rulerOn ? withOpacity(colors.primary, 0.18) : withOpacity(colors.foreground, 0.08),
+              }}
+              onPress={() => {
+                const v = !rulerOn;
+                setRulerOn(v);
+                bridgeRef.current?.setReadingRuler(v);
+              }}
+            >
+              <Text style={{ color: rulerOn ? colors.primary : colors.foreground, fontSize: 12, fontWeight: "600" }}>
+                {t("reader.ruler", "尺子")}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={{
+                paddingHorizontal: 10,
+                paddingVertical: 6,
+                borderRadius: 12,
+                backgroundColor: withOpacity(colors.foreground, 0.08),
+              }}
+              onPress={() => {
+                const order = ["default", "sepia", "paper", "night"] as const;
+                const idx = order.indexOf(bgPreset as any);
+                const next = order[(idx + 1) % order.length];
+                setBgPreset(next);
+                bridgeRef.current?.setBackgroundPreset(next);
+              }}
+            >
+              <Text style={{ color: colors.foreground, fontSize: 12, fontWeight: "600" }}>
+                {bgPreset === "default"
+                  ? t("reader.bgDefault", "默认")
+                  : bgPreset === "sepia"
+                    ? "Sepia"
+                    : bgPreset === "paper"
+                      ? t("reader.bgPaper", "纸张")
+                      : t("reader.bgNight", "夜间")}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       )}
 
       {/* ─── Search Bar ─── */}
@@ -1910,6 +2443,72 @@ export function ReaderScreen({ route, navigation }: Props) {
                 returnKeyType="search"
               />
             </View>
+            <TouchableOpacity
+              style={{
+                paddingHorizontal: 8,
+                paddingVertical: 6,
+                borderRadius: 6,
+                backgroundColor: search.matchCase
+                  ? withOpacity(colors.primary, 0.2)
+                  : "transparent",
+              }}
+              onPress={search.toggleMatchCase}
+            >
+              <Text
+                style={{
+                  color: search.matchCase ? colors.primary : colors.mutedForeground,
+                  fontSize: 12,
+                  fontWeight: "700",
+                }}
+              >
+                Aa
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={{
+                paddingHorizontal: 8,
+                paddingVertical: 6,
+                borderRadius: 6,
+                backgroundColor: search.wholeWord
+                  ? withOpacity(colors.primary, 0.2)
+                  : "transparent",
+              }}
+              onPress={search.toggleWholeWord}
+            >
+              <Text
+                style={{
+                  color: search.wholeWord ? colors.primary : colors.mutedForeground,
+                  fontSize: 12,
+                  fontWeight: "700",
+                }}
+              >
+                {"ab|"}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={{
+                paddingHorizontal: 8,
+                paddingVertical: 6,
+                borderRadius: 6,
+                backgroundColor:
+                  search.direction !== "all" ? withOpacity(colors.primary, 0.2) : "transparent",
+              }}
+              onPress={search.cycleDirection}
+            >
+              <Text
+                style={{
+                  color: search.direction !== "all" ? colors.primary : colors.mutedForeground,
+                  fontSize: 12,
+                  fontWeight: "700",
+                }}
+              >
+                {search.direction === "forward"
+                  ? "→"
+                  : search.direction === "backward"
+                    ? "←"
+                    : "↕"}
+              </Text>
+            </TouchableOpacity>
             <View style={s.searchMetaRow}>
               {search.isSearching ? (
                 <ActivityIndicator size="small" color={colors.mutedForeground} />
@@ -1982,16 +2581,88 @@ export function ReaderScreen({ route, navigation }: Props) {
               <XIcon size={16} color={colors.mutedForeground} />
             </TouchableOpacity>
           </View>
+          {search.cacheProgress != null && (
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                paddingHorizontal: 16,
+                paddingVertical: 6,
+                gap: 8,
+              }}
+            >
+              <ActivityIndicator size="small" color={colors.mutedForeground} />
+              <Text style={{ color: colors.mutedForeground, fontSize: 12 }}>
+                {t("reader.searchIndexing", "正在建立搜索索引…")} {Math.round(search.cacheProgress * 100)}%
+              </Text>
+            </View>
+          )}
+          {search.searchResults.length > 0 && (
+            <View style={{ maxHeight: 320 }}>
+              <FlatList
+                data={search.searchResults}
+                keyExtractor={(_, i) => String(i)}
+                initialNumToRender={20}
+                maxToRenderPerBatch={20}
+                windowSize={7}
+                keyboardShouldPersistTaps="handled"
+                renderItem={({ item, index }) => (
+                  <TouchableOpacity
+                    style={{
+                      paddingHorizontal: 16,
+                      paddingVertical: 8,
+                      backgroundColor:
+                        index === search.searchIndex
+                          ? withOpacity(colors.primary, 0.12)
+                          : "transparent",
+                    }}
+                    onPress={() => search.goToMatch(index)}
+                  >
+                    <Text
+                      style={{ color: colors.mutedForeground, fontSize: 11, marginBottom: 2 }}
+                      numberOfLines={1}
+                    >
+                      {index + 1} · {t("reader.searchChapter", "章节")} {item.sectionIndex + 1}
+                    </Text>
+                    <Text style={{ color: colors.foreground, fontSize: 13 }} numberOfLines={2}>
+                      {item.excerpt.pre}
+                      <Text style={{ color: colors.primary, fontWeight: "600" }}>
+                        {item.excerpt.match}
+                      </Text>
+                      {item.excerpt.post}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              />
+              {search.searchTruncated && (
+                <Text
+                  style={{
+                    color: colors.mutedForeground,
+                    fontSize: 11,
+                    paddingHorizontal: 16,
+                    paddingVertical: 4,
+                  }}
+                >
+                  {t("reader.searchTruncated", "仅显示前 {{count}} 条结果", {
+                    count: search.searchResults.length,
+                  })}
+                </Text>
+              )}
+            </View>
+          )}
         </View>
       )}
 
-      {/* ─── TOC & Bookmarks Panel ─── */}
+      {/* ─── TOC & Bookmarks & Images Panel ─── */}
       <ReaderTOCPanel
         visible={showTOC}
         activeTab={tocActiveTab}
         toc={toc}
         bookmarks={bookBookmarks}
         currentChapter={currentChapter}
+        images={imageItems}
+        imageProgress={imageProgress}
+        imageDataMap={imageDataMap}
         onClose={() => setShowTOC(false)}
         onTabChange={setTocActiveTab}
         onSelectTocItem={goToTocItem}
@@ -2000,7 +2671,48 @@ export function ReaderScreen({ route, navigation }: Props) {
           setShowTOC(false);
         }}
         onDeleteBookmark={(id) => removeBookmark(id)}
+        onOpenImages={openGalleryTab}
+        onRequestImageThumb={requestGalleryThumb}
+        onPreviewImage={openImageViewer}
+        onGoToImage={goToGalleryImage}
       />
+
+      {/* ─── Phase 7: fullscreen image viewer ─── */}
+      {viewerIndex != null && imageItems[viewerIndex] ? (
+        <ImageFullscreenViewer
+          visible
+          images={imageItems}
+          index={viewerIndex}
+          dataUrl={
+            imageDataMap[
+              `${imageItems[viewerIndex].sectionIndex}:${imageItems[viewerIndex].imgIndex}`
+            ]
+          }
+          onClose={closeImageViewer}
+          onPrev={() =>
+            setViewerIndex((v) =>
+              v == null ? v : (v - 1 + imageItems.length) % imageItems.length,
+            )
+          }
+          onNext={() =>
+            setViewerIndex((v) => (v == null ? v : (v + 1) % imageItems.length))
+          }
+          onGoToLocation={() => {
+            const item = viewerIndex != null ? imageItems[viewerIndex] : null;
+            if (item) goToGalleryImage(item.sectionIndex, item.imgIndex);
+          }}
+          onRequestFull={() => {
+            const item = viewerIndex != null ? imageItems[viewerIndex] : null;
+            if (item) {
+              const key = `${item.sectionIndex}:${item.imgIndex}`;
+              if (!imageDataMap[key] && !imageDataPendingRef.current.has(key)) {
+                imageDataPendingRef.current.add(key);
+                bridgeRef.current?.requestImageData(item.sectionIndex, item.imgIndex, 1600);
+              }
+            }
+          }}
+        />
+      ) : null}
 
       {/* ─── Settings Panel ─── */}
       <ReaderSettingsPanel

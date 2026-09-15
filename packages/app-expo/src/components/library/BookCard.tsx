@@ -1,5 +1,6 @@
 import { CheckIcon, ClockIcon, Loader2Icon, MoreVerticalIcon } from "@/components/ui/Icon";
 import { useColors } from "@/styles/theme";
+import { FAVORITE_TAG } from "@/stores/library-store";
 import { getPlatformService } from "@readany/core/services";
 /**
  * BookCard — Touch-optimized book card matching Tauri mobile MobileBookCard exactly.
@@ -158,7 +159,7 @@ export const BookCard = memo(function BookCard({
   }, []);
 
   const openActions = useCallback(async () => {
-    suppressOpenUntilRef.current = Date.now() + 700;
+    suppressOpenUntilRef.current = Date.now() + 250;
     const anchor = await measureAnchor();
     setActionAnchor(anchor);
     setShowActions(true);
@@ -184,8 +185,10 @@ export const BookCard = memo(function BookCard({
             void openActions();
           }
         }}
-        delayLongPress={500}
-        activeOpacity={0.7}
+        delayLongPress={350}
+        delayPressIn={0}
+        activeOpacity={0.75}
+        hitSlop={{ top: 8, bottom: 12, left: 8, right: 8 }}
       >
         {/* Cover — 28:41 aspect ratio */}
         <View ref={coverRef} style={s.coverWrap}>
@@ -341,41 +344,57 @@ export const BookCard = memo(function BookCard({
             </View>
           )}
 
-          <View ref={menuTriggerRef} style={s.moreButtonWrap} pointerEvents="box-none">
-            <TouchableOpacity
-              style={s.moreButton}
-              activeOpacity={0.85}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              onPress={() => {
-                suppressOpenUntilRef.current = Date.now() + 700;
-                void openActions();
-              }}
-            >
-              <MoreVerticalIcon size={14} color="#fff" />
-            </TouchableOpacity>
-          </View>
+          {/* Favorite badge — star, Moon Reader style */}
+          {book.tags.includes(FAVORITE_TAG) && (
+            <View style={s.favBadge} pointerEvents="none">
+              <Text style={s.favBadgeText}>★</Text>
+            </View>
+          )}
+
         </View>
 
         {/* Info below cover */}
         <View style={s.infoWrap}>
-          <Text style={s.bookTitle} numberOfLines={1}>
-            {book.meta.title}
-          </Text>
+          <View style={s.titleRow}>
+            <Text style={[s.bookTitle, { flex: 1 }]} numberOfLines={1}>
+              {book.meta.title}
+            </Text>
+            <View ref={menuTriggerRef} collapsable={false}>
+              <TouchableOpacity
+                style={s.menuButtonInline}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                onPress={() => {
+                  suppressOpenUntilRef.current = Date.now() + 250;
+                  void openActions();
+                }}
+              >
+                <MoreVerticalIcon size={16} color={colors.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+          </View>
           {book.meta.author ? (
             <Text style={s.bookAuthor} numberOfLines={1}>
               {book.meta.author}
             </Text>
           ) : null}
 
-          {/* Tag badges */}
-          {book.tags.length > 0 ? (
+          {/* Tag badges (favorit disembunyikan — sudah ada badge ★ di cover) */}
+          {book.tags.filter((tag) => tag !== FAVORITE_TAG).length > 0 ? (
             <View style={s.tagsRow}>
-              {book.tags.slice(0, 2).map((tag) => (
-                <View key={tag} style={s.tagBadge}>
-                  <Text style={s.tagText}>{tag}</Text>
-                </View>
-              ))}
-              {book.tags.length > 2 && <Text style={s.tagOverflow}>+{book.tags.length - 2}</Text>}
+              {book.tags
+                .filter((tag) => tag !== FAVORITE_TAG)
+                .slice(0, 2)
+                .map((tag) => (
+                  <View key={tag} style={s.tagBadge}>
+                    <Text style={s.tagText}>{tag}</Text>
+                  </View>
+                ))}
+              {book.tags.filter((tag) => tag !== FAVORITE_TAG).length > 2 && (
+                <Text style={s.tagOverflow}>
+                  +{book.tags.filter((tag) => tag !== FAVORITE_TAG).length - 2}
+                </Text>
+              )}
             </View>
           ) : (
             <View style={s.tagsRow}>

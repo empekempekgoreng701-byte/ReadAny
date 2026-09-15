@@ -1937,12 +1937,13 @@ const makeStyles = (colors: ThemeColors) =>
     },
     tabButton: {
       flex: 1,
-      minHeight: 40,
+      minHeight: 48,
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "center",
       gap: 6,
       borderRadius: radius.sm,
+      paddingVertical: 8,
     },
     tabButtonActive: {
       borderWidth: StyleSheet.hairlineWidth,

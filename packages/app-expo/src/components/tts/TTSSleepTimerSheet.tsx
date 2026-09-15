@@ -46,6 +46,7 @@ export function TTSSleepTimerSheet({ visible, onClose }: TTSSleepTimerSheetProps
   const layout = useResponsiveLayout();
   const sleepTimerEndsAt = useTTSStore((s) => s.sleepTimerEndsAt);
   const sleepTimerDurationMinutes = useTTSStore((s) => s.sleepTimerDurationMinutes);
+  const sleepTimerPauseInsteadOfStop = useTTSStore((s) => s.sleepTimerPauseInsteadOfStop);
   const setSleepTimer = useTTSStore((s) => s.setSleepTimer);
   const clearSleepTimer = useTTSStore((s) => s.clearSleepTimer);
   const [customMinutes, setCustomMinutes] = useState(
@@ -284,6 +285,48 @@ export function TTSSleepTimerSheet({ visible, onClose }: TTSSleepTimerSheetProps
                 />
                 <TouchableOpacity style={s.applyBtn} onPress={applyCustomMinutes}>
                   <Text style={s.applyBtnText}>{t("tts.sleepTimerApply", "开始计时")}</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Moon Reader parity: pause keeps position, stop clears session */}
+              <View style={s.inputRow}>
+                <TouchableOpacity
+                  style={[
+                    s.applyBtn,
+                    { flex: 1, backgroundColor: colors.card, borderWidth: 1, borderColor: withOpacity(colors.border, 0.9) },
+                    sleepTimerPauseInsteadOfStop && { borderColor: colors.primary },
+                  ]}
+                  onPress={() =>
+                    useTTSStore.setState({ sleepTimerPauseInsteadOfStop: true })
+                  }
+                >
+                  <Text
+                    style={[
+                      s.applyBtnText,
+                      { color: sleepTimerPauseInsteadOfStop ? colors.primary : colors.foreground },
+                    ]}
+                  >
+                    {t("tts.sleepTimerPauseMode", "暂停（可继续）")}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    s.applyBtn,
+                    { flex: 1, backgroundColor: colors.card, borderWidth: 1, borderColor: withOpacity(colors.border, 0.9) },
+                    !sleepTimerPauseInsteadOfStop && { borderColor: colors.primary },
+                  ]}
+                  onPress={() =>
+                    useTTSStore.setState({ sleepTimerPauseInsteadOfStop: false })
+                  }
+                >
+                  <Text
+                    style={[
+                      s.applyBtnText,
+                      { color: !sleepTimerPauseInsteadOfStop ? colors.primary : colors.foreground },
+                    ]}
+                  >
+                    {t("tts.sleepTimerStopMode", "停止")}
+                  </Text>
                 </TouchableOpacity>
               </View>
 

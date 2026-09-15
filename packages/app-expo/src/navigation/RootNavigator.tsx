@@ -17,6 +17,7 @@ import FontSettingsScreen from "@/screens/settings/FontSettingsScreen";
 import SyncSettingsScreen from "@/screens/settings/SyncSettingsScreen";
 import TTSSettingsScreen from "@/screens/settings/TTSSettingsScreen";
 import TranslationSettingsScreen from "@/screens/settings/TranslationSettingsScreen";
+import SecuritySettingsScreen from "@/screens/settings/SecuritySettingsScreen";
 import VectorModelSettingsScreen from "@/screens/settings/VectorModelSettingsScreen";
 import { useSettingsStore } from "@/stores";
 /**
@@ -36,6 +37,7 @@ export type RootStackParamList = {
   Badges: undefined;
   Skills: undefined;
   VectorModelSettings: undefined;
+  SecuritySettings: undefined;
   AppearanceSettings: undefined;
   AISettings: undefined;
   TTSSettings: undefined;
@@ -101,6 +103,7 @@ export function RootNavigator() {
               component={VectorModelSettingsScreen}
               options={{ animation: "slide_from_right" }}
             />
+            <Stack.Screen name="SecuritySettings" component={SecuritySettingsScreen} />
             <Stack.Screen name="AppearanceSettings" component={AppearanceSettingsScreen} />
             <Stack.Screen name="AISettings" component={AISettingsScreen} />
             <Stack.Screen name="TTSSettings" component={TTSSettingsScreen} />

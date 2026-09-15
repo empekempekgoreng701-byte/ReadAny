@@ -35,7 +35,12 @@ export function ImportDropZone() {
             ext === "fbz" ||
             ext === "txt" ||
             ext === "umd" ||
-            ext === "cbz"
+            ext === "cbz" ||
+            ext === "docx" ||
+            ext === "html" ||
+            ext === "htm" ||
+            ext === "md" ||
+            ext === "markdown"
           ) {
             paths.push(f.path);
           }

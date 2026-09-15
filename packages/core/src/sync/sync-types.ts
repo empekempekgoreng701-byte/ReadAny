@@ -90,4 +90,9 @@ export const BOOK_EXTENSIONS = new Set<string>([
   "fb2",
   "txt",
   "umd",
+  "docx",
+  "html",
+  "htm",
+  "md",
+  "markdown",
 ]);

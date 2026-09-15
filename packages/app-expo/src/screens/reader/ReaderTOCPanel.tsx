@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import { ListIcon } from "./reader-icons";
 import { makeStyles } from "./reader-styles";
+import { ImageGalleryGrid } from "./ReaderImageGallery";
 import { TOCTreeItem } from "./TOCTreeItem";
 import { SCREEN_HEIGHT } from "./reader-constants";
 
@@ -28,17 +29,35 @@ export type Bookmark = {
   createdAt: number;
 };
 
+export type GalleryImage = {
+  sectionIndex: number;
+  imgIndex: number;
+  alt: string;
+  width: number;
+  height: number;
+  cfi: string | null;
+};
+
+export type ReaderPanelTab = "toc" | "bookmarks" | "images";
+
 interface Props {
   visible: boolean;
-  activeTab: "toc" | "bookmarks";
+  activeTab: ReaderPanelTab;
   toc: TOCItem[];
   bookmarks: Bookmark[];
   currentChapter: string;
+  images: GalleryImage[];
+  imageProgress: number | null;
+  imageDataMap: Record<string, string>;
   onClose: () => void;
-  onTabChange: (tab: "toc" | "bookmarks") => void;
+  onTabChange: (tab: ReaderPanelTab) => void;
   onSelectTocItem: (href: string) => void;
   onGoToBookmark: (cfi: string) => void;
   onDeleteBookmark: (id: string) => void;
+  onOpenImages: () => void;
+  onRequestImageThumb: (sectionIndex: number, imgIndex: number) => void;
+  onPreviewImage: (index: number) => void;
+  onGoToImage: (sectionIndex: number, imgIndex: number) => void;
 }
 
 export function ReaderTOCPanel({
@@ -47,11 +66,18 @@ export function ReaderTOCPanel({
   toc,
   bookmarks,
   currentChapter,
+  images,
+  imageProgress,
+  imageDataMap,
   onClose,
   onTabChange,
   onSelectTocItem,
   onGoToBookmark,
   onDeleteBookmark,
+  onOpenImages,
+  onRequestImageThumb,
+  onPreviewImage,
+  onGoToImage,
 }: Props) {
   const colors = useColors();
   const s = makeStyles(colors);
@@ -123,6 +149,30 @@ export function ReaderTOCPanel({
                 {bookmarks.length > 0 ? ` (${bookmarks.length})` : ""}
               </Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                s.tocTab,
+                activeTab === "images" && { backgroundColor: `${colors.primary}14` },
+              ]}
+              onPress={() => {
+                onTabChange("images");
+                onOpenImages();
+              }}
+            >
+              <ListIcon
+                size={14}
+                color={activeTab === "images" ? colors.primary : colors.mutedForeground}
+              />
+              <Text
+                style={[
+                  s.tocTabText,
+                  { color: activeTab === "images" ? colors.primary : colors.mutedForeground },
+                ]}
+              >
+                {t("reader.images", "图片")}
+                {images.length > 0 ? ` (${images.length})` : ""}
+              </Text>
+            </TouchableOpacity>
           </View>
           <TouchableOpacity onPress={onClose}>
             <XIcon size={18} color={colors.mutedForeground} />
@@ -145,6 +195,15 @@ export function ReaderTOCPanel({
               <Text style={s.sheetEmpty}>{t("reader.noToc", "暂无目录信息")}</Text>
             )}
           </ScrollView>
+        ) : activeTab === "images" ? (
+          <ImageGalleryGrid
+            images={images}
+            imageProgress={imageProgress}
+            imageDataMap={imageDataMap}
+            onRequestThumb={onRequestImageThumb}
+            onPreview={onPreviewImage}
+            onGoToImage={onGoToImage}
+          />
         ) : bookmarks.length > 0 ? (
           <ScrollView showsVerticalScrollIndicator={false} style={s.sheetScroll}>
             {bookmarks.map((bm) => (

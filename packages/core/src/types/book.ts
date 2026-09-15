@@ -34,7 +34,10 @@ export type BookFormat =
   | "fb2"
   | "fbz"
   | "txt"
-  | "umd";
+  | "umd"
+  | "docx"
+  | "html"
+  | "md";
 
 export interface Book {
   id: string;

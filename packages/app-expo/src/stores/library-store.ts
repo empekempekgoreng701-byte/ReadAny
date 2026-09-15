@@ -105,7 +105,10 @@ export interface LibraryState {
   removeBookFromGroup: (bookId: string) => void;
   addTagToBook: (bookId: string, tag: string) => void;
   removeTagFromBook: (bookId: string, tag: string) => void;
+  toggleFavorite: (bookId: string) => void;
 }
+
+export const FAVORITE_TAG = "★ Favorite";
 
 async function resolveAppPath(relativePath: string): Promise<string> {
   const platform = getPlatformService();
@@ -201,7 +204,14 @@ async function extractMobileImportMetadata(params: {
 }
 
 function shouldAutoVectorizeMobile(format: Book["format"]): boolean {
-  return format === "epub" || format === "txt" || format === "umd";
+  return (
+    format === "epub" ||
+    format === "txt" ||
+    format === "umd" ||
+    format === "docx" ||
+    format === "html" ||
+    format === "md"
+  );
 }
 
 /**
@@ -353,6 +363,11 @@ async function restoreDeletedMobileBook(
     fbz: "fbz",
     txt: "txt",
     umd: "umd",
+    docx: "docx",
+    html: "html",
+    htm: "html",
+    md: "md",
+    markdown: "md",
   };
   const format: Book["format"] = formatMap[ext || ""] || "epub";
   const fileName = originalName;
@@ -472,6 +487,95 @@ async function restoreDeletedMobileBook(
     };
   }
 
+  if (ext === "docx") {
+    const sourceBytes = await platform.readFile(filePath);
+    const { DocxToEpubConverter } = await import("@readany/core/utils/docx-to-epub");
+    const docxFile = {
+      name: fileName,
+      size: sourceBytes.byteLength,
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      arrayBuffer: () =>
+        Promise.resolve(
+          sourceBytes.buffer.slice(
+            sourceBytes.byteOffset,
+            sourceBytes.byteOffset + sourceBytes.byteLength,
+          ),
+        ),
+    } as unknown as File;
+    const conversion = await new DocxToEpubConverter().convertToBytes({ file: docxFile });
+    await ensureAppSubDir("books");
+    const relativePath = `books/${bookId}.epub`;
+    await platform.writeFile(await resolveAppPath(relativePath), conversion.epubBytes);
+
+    let coverUrl = originalBook.meta.coverUrl;
+    if (conversion.coverBytes && conversion.coverBytes.length > 0) {
+      try {
+        await ensureAppSubDir("covers");
+        const coverRelPath = `covers/${bookId}.${conversion.coverMime === "image/png" ? "png" : "jpg"}`;
+        await platform.writeFile(await resolveAppPath(coverRelPath), conversion.coverBytes);
+        coverUrl = coverRelPath;
+      } catch (coverErr) {
+        console.warn(`[restoreDeletedMobileBook] DOCX cover save failed: ${coverErr}`);
+      }
+    }
+
+    return {
+      ...originalBook,
+      filePath: relativePath,
+      format: "docx",
+      meta: {
+        ...originalBook.meta,
+        title: conversion.bookTitle || originalBook.meta.title || fileName.replace(/\.\w+$/i, ""),
+        author: conversion.author || originalBook.meta.author || "",
+        coverUrl,
+      },
+      deletedAt: undefined,
+      fileHash,
+      syncStatus: "local",
+      isVectorized: false,
+      vectorizeProgress: 0,
+      updatedAt: Date.now(),
+      lastOpenedAt: Date.now(),
+    };
+  }
+
+  if (ext === "html" || ext === "htm" || ext === "md" || ext === "markdown") {
+    const sourceBytes = await platform.readFile(filePath);
+    const { HtmlMdToEpubConverter } = await import("@readany/core/utils/htmlmd-to-epub");
+    const bytes = ensureUtf8Bytes(sourceBytes);
+    const kind: "html" | "markdown" = ext === "md" || ext === "markdown" ? "markdown" : "html";
+    const srcFile = {
+      name: fileName,
+      size: bytes.byteLength,
+      type: kind === "markdown" ? "text/markdown" : "text/html",
+      arrayBuffer: () =>
+        Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)),
+    } as unknown as File;
+    const conversion = await new HtmlMdToEpubConverter().convertToBytes({ file: srcFile, kind });
+    await ensureAppSubDir("books");
+    const relativePath = `books/${bookId}.epub`;
+    await platform.writeFile(await resolveAppPath(relativePath), conversion.epubBytes);
+
+    return {
+      ...originalBook,
+      filePath: relativePath,
+      format: ext === "md" || ext === "markdown" ? "md" : "html",
+      meta: {
+        ...originalBook.meta,
+        title: conversion.bookTitle || originalBook.meta.title || fileName.replace(/\.\w+$/i, ""),
+        author: originalBook.meta.author || "",
+        coverUrl: originalBook.meta.coverUrl,
+      },
+      deletedAt: undefined,
+      fileHash,
+      syncStatus: "local",
+      isVectorized: false,
+      vectorizeProgress: 0,
+      updatedAt: Date.now(),
+      lastOpenedAt: Date.now(),
+    };
+  }
+
   const { relativePath } = await copyBookToAppData(bookId, ext || "epub", filePath);
 
   let title = originalBook.meta.title || fileName.replace(/\.\w+$/i, "") || "Untitled";
@@ -550,6 +654,11 @@ async function inspectDeletedMobileBookCandidate(
     fbz: "fbz",
     txt: "txt",
     umd: "umd",
+    docx: "docx",
+    html: "html",
+    htm: "html",
+    md: "md",
+    markdown: "md",
   };
   const format: Book["format"] = formatMap[ext || ""] || "epub";
   const fileName = originalName;
@@ -641,6 +750,73 @@ async function inspectDeletedMobileBookCandidate(
         title: fileName.replace(/\.\w+$/i, "") || originalBook.meta.title,
         author: "",
         format: "umd",
+        fileHash,
+      };
+    }
+  }
+
+  if (ext === "docx") {
+    try {
+      const { DocxToEpubConverter } = await import("@readany/core/utils/docx-to-epub");
+      const platform = getPlatformService();
+      const sourceBytes = await platform.readFile(filePath);
+      const docxFile = {
+        name: fileName,
+        size: sourceBytes.byteLength,
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        arrayBuffer: () =>
+          Promise.resolve(
+            sourceBytes.buffer.slice(
+              sourceBytes.byteOffset,
+              sourceBytes.byteOffset + sourceBytes.byteLength,
+            ),
+          ),
+      } as unknown as File;
+      const conversion = await new DocxToEpubConverter().convertToBytes({ file: docxFile });
+      return {
+        title: conversion.bookTitle || fileName.replace(/\.\w+$/i, "") || originalBook.meta.title,
+        author: conversion.author || "",
+        format: "docx",
+        fileHash,
+      };
+    } catch (err) {
+      console.warn("[Library] DOCX inspection failed during reimport:", err);
+      return {
+        title: fileName.replace(/\.\w+$/i, "") || originalBook.meta.title,
+        author: "",
+        format: "docx",
+        fileHash,
+      };
+    }
+  }
+
+  if (ext === "html" || ext === "htm" || ext === "md" || ext === "markdown") {
+    try {
+      const { HtmlMdToEpubConverter } = await import("@readany/core/utils/htmlmd-to-epub");
+      const platform = getPlatformService();
+      const sourceBytes = await platform.readFile(filePath);
+      const bytes = ensureUtf8Bytes(sourceBytes);
+      const kind: "html" | "markdown" = ext === "md" || ext === "markdown" ? "markdown" : "html";
+      const srcFile = {
+        name: fileName,
+        size: bytes.byteLength,
+        type: kind === "markdown" ? "text/markdown" : "text/html",
+        arrayBuffer: () =>
+          Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)),
+      } as unknown as File;
+      const conversion = await new HtmlMdToEpubConverter().convertToBytes({ file: srcFile, kind });
+      return {
+        title: conversion.bookTitle || fileName.replace(/\.\w+$/i, "") || originalBook.meta.title,
+        author: "",
+        format: ext === "md" || ext === "markdown" ? "md" : "html",
+        fileHash,
+      };
+    } catch (err) {
+      console.warn("[Library] HTML/MD inspection failed during reimport:", err);
+      return {
+        title: fileName.replace(/\.\w+$/i, "") || originalBook.meta.title,
+        author: "",
+        format: ext === "md" || ext === "markdown" ? "md" : "html",
         fileHash,
       };
     }
@@ -1138,6 +1314,228 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
             }
           }
 
+          // For DOCX files: parse word/document.xml + embed images, convert to EPUB
+          if (ext === "docx") {
+            try {
+              const { DocxToEpubConverter } = await import(
+                "@readany/core/utils/docx-to-epub"
+              );
+              const sourceBytes = await platform.readFile(filePath);
+              const docxFile = {
+                name: fileName,
+                size: sourceBytes.byteLength,
+                type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                arrayBuffer: () =>
+                  Promise.resolve(
+                    sourceBytes.buffer.slice(
+                      sourceBytes.byteOffset,
+                      sourceBytes.byteOffset + sourceBytes.byteLength,
+                    ),
+                  ),
+              } as unknown as File;
+              const conversion = await new DocxToEpubConverter().convertToBytes({
+                file: docxFile,
+              });
+
+              await ensureAppSubDir("books");
+              const relativePath = `books/${bookId}.epub`;
+              const absPath = await resolveAppPath(relativePath);
+              await platform.writeFile(absPath, conversion.epubBytes);
+
+              let coverUrl: string | undefined;
+              if (conversion.coverBytes && conversion.coverBytes.length > 0) {
+                try {
+                  await ensureAppSubDir("covers");
+                  const coverRelPath = `covers/${bookId}.${conversion.coverMime === "image/png" ? "png" : "jpg"}`;
+                  await platform.writeFile(
+                    await resolveAppPath(coverRelPath),
+                    conversion.coverBytes,
+                  );
+                  coverUrl = coverRelPath;
+                } catch (coverErr) {
+                  console.warn(`[importBooks] Failed to save DOCX cover for ${fileName}:`, coverErr);
+                }
+              }
+
+              const title =
+                conversion.bookTitle || fileName.replace(/\.\w+$/i, "") || "Untitled";
+              const book: Book = {
+                id: bookId,
+                filePath: relativePath,
+                format: "docx",
+                meta: {
+                  ...(deletedMatch?.meta ?? {}),
+                  title,
+                  author: conversion.author || "",
+                  coverUrl: coverUrl || deletedMatch?.meta.coverUrl,
+                },
+                groupId: deletedMatch?.groupId,
+                progress: deletedMatch?.progress ?? 0,
+                currentCfi: deletedMatch?.currentCfi,
+                isVectorized: false,
+                vectorizeProgress: 0,
+                tags: deletedMatch?.tags ?? [],
+                fileHash,
+                syncStatus: "local",
+                addedAt: deletedMatch?.addedAt ?? Date.now(),
+                updatedAt: Date.now(),
+                lastOpenedAt: deletedMatch?.lastOpenedAt ?? Date.now(),
+              };
+
+              if (deletedMatch) {
+                set((state) => ({ books: [...state.books, book] }));
+                await db.updateBook(book.id, {
+                  filePath: book.filePath,
+                  format: book.format,
+                  meta: book.meta,
+                  deletedAt: undefined,
+                  progress: book.progress,
+                  currentCfi: book.currentCfi,
+                  isVectorized: false,
+                  vectorizeProgress: 0,
+                  tags: book.tags,
+                  fileHash: book.fileHash,
+                  syncStatus: "local",
+                  lastOpenedAt: Date.now(),
+                });
+                debouncedSave("library-books", get().books);
+              } else {
+                await get().addBook(book);
+              }
+              result.imported.push(book);
+              if (fileHash) {
+                duplicateIndex.byHash.set(fileHash, book);
+              }
+              console.log(`[importBooks] DOCX imported as EPUB: ${title}`);
+
+              try {
+                const vmState = useVectorModelStore.getState();
+                if (
+                  vmState.autoVectorizeOnImport &&
+                  vmState.vectorModelEnabled &&
+                  vmState.hasVectorCapability() &&
+                  shouldAutoVectorizeMobile("docx")
+                ) {
+                  const base64 = bytesToBase64(conversion.epubBytes);
+                  queueAutoVectorize(book, base64, "application/epub+zip");
+                }
+              } catch (autoVectorizeErr) {
+                console.warn(
+                  `[importBooks] Auto-vectorize enqueue failed for ${fileName}:`,
+                  autoVectorizeErr,
+                );
+              }
+              continue;
+            } catch (convErr) {
+              console.error("[importBooks] DOCX conversion failed:", convErr);
+              throw convErr;
+            }
+          }
+
+          // For HTML/Markdown files: sanitize/parse, split chapters, convert to EPUB
+          if (ext === "html" || ext === "htm" || ext === "md" || ext === "markdown") {
+            try {
+              const { HtmlMdToEpubConverter } = await import(
+                "@readany/core/utils/htmlmd-to-epub"
+              );
+              const sourceBytes = await platform.readFile(filePath);
+              const bytes = ensureUtf8Bytes(sourceBytes);
+              const kind: "html" | "markdown" =
+                ext === "md" || ext === "markdown" ? "markdown" : "html";
+              const srcFile = {
+                name: fileName,
+                size: bytes.byteLength,
+                type: kind === "markdown" ? "text/markdown" : "text/html",
+                arrayBuffer: () =>
+                  Promise.resolve(
+                    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+                  ),
+              } as unknown as File;
+              const conversion = await new HtmlMdToEpubConverter().convertToBytes({
+                file: srcFile,
+                kind,
+              });
+
+              await ensureAppSubDir("books");
+              const relativePath = `books/${bookId}.epub`;
+              const absPath = await resolveAppPath(relativePath);
+              await platform.writeFile(absPath, conversion.epubBytes);
+
+              const title =
+                conversion.bookTitle || fileName.replace(/\.\w+$/i, "") || "Untitled";
+              const book: Book = {
+                id: bookId,
+                filePath: relativePath,
+                format: ext === "md" || ext === "markdown" ? "md" : "html",
+                meta: {
+                  ...(deletedMatch?.meta ?? {}),
+                  title,
+                  author: "",
+                  coverUrl: deletedMatch?.meta.coverUrl,
+                },
+                groupId: deletedMatch?.groupId,
+                progress: deletedMatch?.progress ?? 0,
+                currentCfi: deletedMatch?.currentCfi,
+                isVectorized: false,
+                vectorizeProgress: 0,
+                tags: deletedMatch?.tags ?? [],
+                fileHash,
+                syncStatus: "local",
+                addedAt: deletedMatch?.addedAt ?? Date.now(),
+                updatedAt: Date.now(),
+                lastOpenedAt: deletedMatch?.lastOpenedAt ?? Date.now(),
+              };
+
+              if (deletedMatch) {
+                set((state) => ({ books: [...state.books, book] }));
+                await db.updateBook(book.id, {
+                  filePath: book.filePath,
+                  format: book.format,
+                  meta: book.meta,
+                  deletedAt: undefined,
+                  progress: book.progress,
+                  currentCfi: book.currentCfi,
+                  isVectorized: false,
+                  vectorizeProgress: 0,
+                  tags: book.tags,
+                  fileHash: book.fileHash,
+                  syncStatus: "local",
+                  lastOpenedAt: Date.now(),
+                });
+                debouncedSave("library-books", get().books);
+              } else {
+                await get().addBook(book);
+              }
+              result.imported.push(book);
+              if (fileHash) {
+                duplicateIndex.byHash.set(fileHash, book);
+              }
+              console.log(`[importBooks] ${ext.toUpperCase()} imported as EPUB: ${title}`);
+
+              try {
+                const vmState = useVectorModelStore.getState();
+                if (
+                  vmState.autoVectorizeOnImport &&
+                  vmState.vectorModelEnabled &&
+                  vmState.hasVectorCapability() &&
+                  shouldAutoVectorizeMobile(book.format)
+                ) {
+                  const base64 = bytesToBase64(conversion.epubBytes);
+                  queueAutoVectorize(book, base64, "application/epub+zip");
+                }
+              } catch (autoVectorizeErr) {
+                console.warn(
+                  `[importBooks] Auto-vectorize enqueue failed for ${fileName}:`,
+                  autoVectorizeErr,
+                );
+              }
+              continue;
+            } catch (convErr) {
+              console.error("[importBooks] HTML/MD conversion failed:", convErr);
+              throw convErr;
+            }
+          }
+
           const { relativePath } = await copyBookToAppData(bookId, ext || "epub", filePath);
           console.log(`[importBooks] File copied. relativePath: ${relativePath}`);
 
@@ -1254,6 +1652,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
                 fb2: "application/x-fictionbook+xml",
                 fbz: "application/x-zip-compressed-fb2",
                 txt: "text/plain",
+                docx: "application/epub+zip",
+                html: "application/epub+zip",
+                md: "application/epub+zip",
               };
               const mimeType = mimeTypes[format] || "application/epub+zip";
               queueAutoVectorize(book, base64, mimeType);
@@ -1491,5 +1892,15 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     });
     const book = get().books.find((b) => b.id === bookId);
     if (book) db.updateBook(bookId, { tags: book.tags }).catch(() => {});
+  },
+
+  toggleFavorite: (bookId) => {
+    const book = get().books.find((b) => b.id === bookId);
+    if (!book) return;
+    if (book.tags.includes(FAVORITE_TAG)) {
+      get().removeTagFromBook(bookId, FAVORITE_TAG);
+    } else {
+      get().addTagToBook(bookId, FAVORITE_TAG);
+    }
   },
 }));

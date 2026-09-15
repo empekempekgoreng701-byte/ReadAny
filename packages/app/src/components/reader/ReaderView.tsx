@@ -68,7 +68,23 @@ const INITIAL_LOCATION_CHAPTER_PREFIX = "chapter:";
 const BOOK_IMPORT_FILTERS = [
   {
     name: "Books",
-    extensions: ["epub", "pdf", "mobi", "azw", "azw3", "cbz", "fb2", "fbz", "txt", "umd"],
+    extensions: [
+      "epub",
+      "pdf",
+      "mobi",
+      "azw",
+      "azw3",
+      "cbz",
+      "fb2",
+      "fbz",
+      "txt",
+      "umd",
+      "docx",
+      "html",
+      "htm",
+      "md",
+      "markdown",
+    ],
   },
 ];
 

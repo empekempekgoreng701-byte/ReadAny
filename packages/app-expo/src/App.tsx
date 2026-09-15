@@ -26,7 +26,7 @@ import { DarkTheme, DefaultTheme, NavigationContainer } from "@react-navigation/
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { LogBox, Platform, Text, View } from "react-native";
+import { AppState, LogBox, Platform, Text, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -49,8 +49,10 @@ import TrackPlayer, {
   Capability,
 } from "react-native-track-player";
 
+import { AppLockScreen } from "@/components/security/AppLockScreen";
 import { FloatingTTSBubble } from "@/components/tts/FloatingTTSBubble";
 import { UpdateDialog } from "@/components/update/UpdateDialog";
+import { useSecurityStore } from "@/stores/security-store";
 import { useUpdateChecker } from "@/hooks/use-update-checker";
 import { navigationRef } from "@/lib/navigationRef";
 import { ExpoPlatformService } from "@/lib/platform/expo-platform-service";
@@ -267,6 +269,60 @@ function AppInner() {
   useUpdateChecker();
   useAutoSync(loadBooks);
 
+  // Phase 10.4: lock again when returning from background (if enabled).
+  const appLockEnabled = useSecurityStore((s) => s.appLockEnabled);
+  const hasPin = useSecurityStore((s) => s.hasPin);
+  const lockOnBackground = useSecurityStore((s) => s.lockOnBackground);
+  const unlockedThisSession = useSecurityStore((s) => s.unlockedThisSession);
+  const refreshHasPin = useSecurityStore((s) => s.refreshHasPin);
+  const markLocked = useSecurityStore((s) => s.markLocked);
+
+  useEffect(() => {
+    void refreshHasPin();
+  }, [refreshHasPin]);
+
+  useEffect(() => {
+    if (!appLockEnabled || !lockOnBackground) return;
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "background" || state === "inactive") {
+        markLocked();
+      }
+    });
+    return () => sub.remove();
+  }, [appLockEnabled, lockOnBackground, markLocked]);
+
+  const lockVisible = appLockEnabled && hasPin && !unlockedThisSession;
+
+  // Phase 10.1 + 10.3: incoming ebook files AND launcher shortcut links.
+  // Cold start via getInitialURL, warm start via 'url' event (singleTask).
+  // Order matters: shortcuts first (deep links), then file intents.
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+    void Promise.all([
+      import("@/lib/app-shortcuts"),
+      import("@/lib/incoming-file-intent"),
+      import("expo-linking"),
+    ]).then(([shortcuts, incoming, Linking]) => {
+      // Cold start
+      void Linking.getInitialURL().then((url) => {
+        if (!url) return;
+        void shortcuts.handleShortcutUrl(url).then((handled) => {
+          if (!handled) void incoming.handleIncomingFileUrl(url);
+        });
+      });
+      // Warm start
+      const fileSub = incoming.subscribeIncomingFileIntents();
+      const shortcutSub = shortcuts.subscribeShortcutLinks((url) => {
+        void shortcuts.handleShortcutUrl(url);
+      });
+      unsubscribe = () => {
+        fileSub();
+        shortcutSub();
+      };
+    });
+    return () => unsubscribe?.();
+  }, []);
+
   const navTheme = useMemo(
     () => ({
       ...(isDark ? DarkTheme : DefaultTheme),
@@ -292,6 +348,7 @@ function AppInner() {
           </NavigationContainer>
           <UpdateDialog />
           <FloatingTTSBubble />
+          <AppLockScreen visible={lockVisible} />
         </SafeAreaProvider>
       </KeyboardProvider>
     </GestureHandlerRootView>

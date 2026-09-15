@@ -16,6 +16,14 @@ export { TxtToEpubConverter } from "./txt-to-epub";
 export type { Txt2EpubOptions, TxtConversionResult, TxtBytesConversionResult } from "./txt-to-epub";
 export { UmdToEpubConverter } from "./umd-to-epub";
 export type { Umd2EpubOptions, UmdBytesConversionResult } from "./umd-to-epub";
+export { DocxToEpubConverter } from "./docx-to-epub";
+export type { DocxBytesConversionResult } from "./docx-to-epub";
+export { HtmlMdToEpubConverter } from "./htmlmd-to-epub";
+export type {
+  HtmlMd2EpubOptions,
+  HtmlMdBytesConversionResult,
+  HtmlMdSourceKind,
+} from "./htmlmd-to-epub";
 export { parseUmd } from "./umd-parser";
 export type { UmdParsed, UmdChapter, UmdInflate } from "./umd-parser";
 export {
