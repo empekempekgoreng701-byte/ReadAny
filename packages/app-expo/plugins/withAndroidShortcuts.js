@@ -16,8 +16,15 @@ const { withAndroidManifest, withDangerousMod } = require("@expo/config-plugins"
 const fs = require("node:fs");
 const path = require("node:path");
 
-function buildShortcutsXml(scheme) {
+function buildShortcutsXml(scheme, pkg) {
   const s = scheme || "readany";
+  // NOTE: android:targetPackage uses the literal variant package name.
+  // There is NO @string/app_package resource anywhere (verified: no
+  // string resource, no generator plugin creates it) — referencing it
+  // fails AAPT linking with "resource string/app_package not found".
+  // The placeholder step below is therefore removed; values are final.
+  const p = pkg || "com.readany.app.dev";
+  const activityClass = `${p}.MainActivity`;
   return `<?xml version="1.0" encoding="utf-8"?>
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
     <shortcut
@@ -27,8 +34,8 @@ function buildShortcutsXml(scheme) {
         android:shortcutShortLabel="@string/app_name">
         <intent
             android:action="android.intent.action.VIEW"
-            android:targetPackage="@string/app_package"
-            android:targetClass="com.readany.app.MainActivityPlaceholder"
+            android:targetPackage="${p}"
+            android:targetClass="${activityClass}"
             android:data="${s}://library" />
     </shortcut>
     <shortcut
@@ -38,8 +45,8 @@ function buildShortcutsXml(scheme) {
         android:shortcutShortLabel="@string/app_name">
         <intent
             android:action="android.intent.action.VIEW"
-            android:targetPackage="@string/app_package"
-            android:targetClass="com.readany.app.MainActivityPlaceholder"
+            android:targetPackage="${p}"
+            android:targetClass="${activityClass}"
             android:data="${s}://library?filter=favorites" />
     </shortcut>
     <shortcut
@@ -49,8 +56,8 @@ function buildShortcutsXml(scheme) {
         android:shortcutShortLabel="@string/app_name">
         <intent
             android:action="android.intent.action.VIEW"
-            android:targetPackage="@string/app_package"
-            android:targetClass="com.readany.app.MainActivityPlaceholder"
+            android:targetPackage="${p}"
+            android:targetClass="${activityClass}"
             android:data="${s}://continue-reading" />
     </shortcut>
 </shortcuts>
@@ -62,7 +69,8 @@ module.exports = function withAndroidShortcuts(config, props) {
   const pkg =
     (config.android && config.android.package) || "com.readany.app.dev";
 
-  // 1. Write res/xml/shortcuts.xml at prebuild time.
+  // 1. Write res/xml/shortcuts.xml at prebuild time, with final
+  //    variant package + activity class already inlined (no placeholders).
   config = withDangerousMod(config, [
     "android",
     (cfg) => {
@@ -76,7 +84,7 @@ module.exports = function withAndroidShortcuts(config, props) {
         "xml",
       );
       fs.mkdirSync(resDir, { recursive: true });
-      fs.writeFileSync(path.join(resDir, "shortcuts.xml"), buildShortcutsXml(scheme));
+      fs.writeFileSync(path.join(resDir, "shortcuts.xml"), buildShortcutsXml(scheme, pkg));
       return cfg;
     },
   ]);
@@ -118,35 +126,6 @@ module.exports = function withAndroidShortcuts(config, props) {
     }
     return cfg;
   });
-
-  // NOTE: targetClass/targetPackage placeholders are resolved by a second
-  // pass below because the real activity class name depends on the variant
-  // package (com.readany.app[.dev|.preview].MainActivity).
-  config = withDangerousMod(config, [
-    "android",
-    (cfg) => {
-      const xmlPath = path.join(
-        cfg.modRequest.projectRoot,
-        "android",
-        "app",
-        "src",
-        "main",
-        "res",
-        "xml",
-        "shortcuts.xml",
-      );
-      try {
-        let xml = fs.readFileSync(xmlPath, "utf8");
-        const activityClass = `${pkg}.MainActivity`;
-        xml = xml.split("com.readany.app.MainActivityPlaceholder").join(activityClass);
-        xml = xml.split("@string/app_package").join(pkg);
-        fs.writeFileSync(xmlPath, xml);
-      } catch {
-        // best-effort; prebuild will surface real errors
-      }
-      return cfg;
-    },
-  ]);
 
   return config;
 };
