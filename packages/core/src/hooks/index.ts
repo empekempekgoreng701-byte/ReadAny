@@ -8,7 +8,9 @@ export { useKeyboard } from "./use-keyboard";
 export { useTranslator, type UseTranslatorOptions } from "./useTranslator";
 export {
   useChapterTranslation,
+  selectRestoreTarget,
   type ChapterTranslationState,
+  type RestoreTarget,
   type UseChapterTranslationOptions,
 } from "./useChapterTranslation";
 export {

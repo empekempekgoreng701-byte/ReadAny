@@ -592,6 +592,11 @@ export function ReaderView({ bookId, tabId }: ReaderViewProps) {
   // Separate delayed ready for chapter translation (avoids DOM conflict with CFI navigation)
   const [translationReady, setTranslationReady] = useState(false);
 
+  // Book document state (declared before first use: the translation hook
+  // options below read bookDoc during render).
+  const [bookDoc, setBookDoc] = useState<BookDoc | null>(null);
+  const [bookFormat, setBookFormat] = useState<BookFormat>("EPUB");
+
   // Chapter translation hook (section-aware, P0-2/P0-4: no contents[0] assumption)
   const chapterTranslation = useChapterTranslation({
     bookId,
@@ -619,6 +624,8 @@ export function ReaderView({ bookId, tabId }: ReaderViewProps) {
       ),
     getCurrentCfi: () => readerTab?.currentCfi,
     goToCfi: (cfi) => foliateRef.current?.goToCFI(cfi),
+    getCurrentFraction: () => readerTab?.progress,
+    goToFraction: (fraction) => foliateRef.current?.goToFraction(fraction),
   });
 
   // Track which highlights have been rendered (id -> {cfi, note, color}) to detect changes
@@ -803,9 +810,6 @@ export function ReaderView({ bookId, tabId }: ReaderViewProps) {
     return () => clearTimeout(timer);
   }, [highlights, foliateReady, bookId]);
 
-  // Book document state
-  const [bookDoc, setBookDoc] = useState<BookDoc | null>(null);
-  const [bookFormat, setBookFormat] = useState<BookFormat>("EPUB");
   const isFixedLayout = isFixedLayoutBook(bookFormat, bookDoc);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

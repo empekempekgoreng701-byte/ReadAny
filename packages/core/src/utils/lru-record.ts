@@ -37,6 +37,41 @@ export function lruRecordPut(
   return next;
 }
 
+/**
+ * Enforce a total byte budget (LRU order: drops oldest first). `sizeOf`
+ * measures one entry (e.g. base64 string length). Returns the original
+ * reference when already within budget. This is the real OOM guard: entry
+ * counts alone cannot bound memory when values are ~1MB base64 images.
+ */
+export function enforceByteLimit(
+  map: Record<string, string>,
+  maxBytes: number,
+  sizeOf: (value: string) => number = (value) => value.length,
+): Record<string, string> {
+  const keys = Object.keys(map);
+  let total = 0;
+  for (const key of keys) {
+    total += sizeOf(map[key] as string);
+    if (total > maxBytes) break;
+  }
+  if (total <= maxBytes) return map;
+  let running = 0;
+  for (const key of keys) running += sizeOf(map[key] as string);
+  const next: Record<string, string> = {};
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i] as string;
+    const size = sizeOf(map[key] as string);
+    // Always keep the newest entry (currently viewed image); the budget is
+    // best-effort, never a reason to lose what is on screen.
+    if (running <= maxBytes || i === keys.length - 1) {
+      next[key] = map[key] as string;
+    } else {
+      running -= size;
+    }
+  }
+  return next;
+}
+
 /** Remove keys; returns the original reference when nothing changed. */
 export function lruRecordDelete(
   prev: Record<string, string>,

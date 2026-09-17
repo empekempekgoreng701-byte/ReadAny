@@ -70,8 +70,42 @@ export interface UseChapterTranslationOptions {
   getCurrentCfi?: () => string | undefined;
   /** Navigate to a CFI — used to restore position after translation injection */
   goToCfi?: (cfi: string) => void | Promise<void>;
+  /**
+   * Get current reader position as a book fraction (0-1). Preferred over CFI
+   * for post-injection restore: foliate fractions derive from static section
+   * sizes, so they stay valid when injected translation divs shift CFI child
+   * indices (restoring a pre-injection CFI would jump upward).
+   */
+  getCurrentFraction?: () => number | undefined;
+  /** Navigate to a book fraction — used to restore position after translation injection */
+  goToFraction?: (fraction: number) => void | Promise<void>;
   /** Wait until layout is stable after DOM injection (replaces arbitrary sleeps). */
   waitForLayoutStable?: () => Promise<void>;
+}
+
+export type RestoreTarget =
+  | { kind: "fraction"; fraction: number }
+  | { kind: "cfi"; cfi: string };
+
+/**
+ * Choose the post-injection restore anchor. Book fractions win: they resolve
+ * against static section sizes (immune to injected-div CFI drift), while a
+ * pre-injection CFI systematically resolves too early once translation divs
+ * are interleaved. Fraction 0 (book start) needs no restore — content below
+ * the viewport cannot move what is visible.
+ */
+export function selectRestoreTarget(input: {
+  fraction?: number | null;
+  cfi?: string | null;
+}): RestoreTarget | null {
+  const fraction = input.fraction;
+  if (typeof fraction === "number" && Number.isFinite(fraction) && fraction > 0) {
+    return { kind: "fraction", fraction: Math.min(fraction, 0.999999) };
+  }
+  if (typeof input.cfi === "string" && input.cfi.length > 0) {
+    return { kind: "cfi", cfi: input.cfi };
+  }
+  return null;
 }
 
 function waitForNextFrames(frames = 2): Promise<void> {
@@ -105,6 +139,8 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
     applyVisibility,
     getCurrentCfi,
     goToCfi,
+    getCurrentFraction,
+    goToFraction,
     waitForLayoutStable,
   } = options;
 
@@ -118,6 +154,8 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
   const applyVisibilityRef = useRef(applyVisibility);
   const getCurrentCfiRef = useRef(getCurrentCfi);
   const goToCfiRef = useRef(goToCfi);
+  const getCurrentFractionRef = useRef(getCurrentFraction);
+  const goToFractionRef = useRef(goToFraction);
   const waitForLayoutStableRef = useRef(waitForLayoutStable);
   const visibilityRef = useRef({ originalVisible: true, translationVisible: true });
 
@@ -132,6 +170,8 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
   applyVisibilityRef.current = applyVisibility;
   getCurrentCfiRef.current = getCurrentCfi;
   goToCfiRef.current = goToCfi;
+  getCurrentFractionRef.current = getCurrentFraction;
+  goToFractionRef.current = goToFraction;
   waitForLayoutStableRef.current = waitForLayoutStable;
 
   // ---- Start Translation ---------------------------------------------------
@@ -169,6 +209,17 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
             model: config.provider.model || aiConfig.activeModel,
           };
         }
+      }
+      // Fail fast with an actionable message instead of letting every chunk
+      // fail with a provider auth error (reader-sheet parity with the
+      // overview's pre-flight guard).
+      if (config.provider.id === "ai" && !config.provider.apiKey) {
+        if (!isCurrent()) return;
+        setState({
+          status: "error",
+          message: "AI endpoint not configured — add an endpoint with an API key in Settings.",
+        });
+        return;
       }
 
       if (!isCurrent()) return;
@@ -400,14 +451,19 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
         }
 
         if (results.length > 0 && !cancelled && requestIdRef.current === requestId) {
-          // Remember position before injection
-          const cfiBeforeInject = getCurrentCfiRef.current?.();
+          // Remember position before injection. Prefer the book fraction: it
+          // resolves against static section sizes, so unlike a pre-injection
+          // CFI it stays valid after translation divs shift child indices.
+          const restoreTarget = selectRestoreTarget({
+            fraction: getCurrentFractionRef.current?.(),
+            cfi: getCurrentCfiRef.current?.(),
+          });
 
           await injectTranslationsRef.current?.(results, visibility, capturedSection);
           if (cancelled || requestIdRef.current !== requestId) return;
 
           // Restore position after layout is actually stable (no arbitrary sleep).
-          if (cfiBeforeInject && goToCfiRef.current) {
+          if (restoreTarget) {
             try {
               if (waitForLayoutStableRef.current) await waitForLayoutStableRef.current();
               else await waitForNextFrames(2);
@@ -415,7 +471,11 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
               // no-op
             }
             if (cancelled || requestIdRef.current !== requestId) return;
-            await goToCfiRef.current(cfiBeforeInject);
+            if (restoreTarget.kind === "fraction" && goToFractionRef.current) {
+              await goToFractionRef.current(restoreTarget.fraction);
+            } else if (restoreTarget.kind === "cfi" && goToCfiRef.current) {
+              await goToCfiRef.current(restoreTarget.cfi);
+            }
           }
           if (cancelled || requestIdRef.current !== requestId) return;
 

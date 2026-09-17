@@ -3071,6 +3071,13 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
           dataUrl = canvas.toDataURL('image/jpeg', 0.72);
         } catch (e) {
           dataUrl = src;
+        } finally {
+          // Release the raster immediately: under memory pressure the GC may
+          // not reclaim the canvas bitmap before the next encode starts.
+          try {
+            canvas.width = 0;
+            canvas.height = 0;
+          } catch (e) {}
         }
         postToRN('imageData', { sectionIndex: si, imgIndex: di, dataUrl, width: natW, height: natH });
       } catch (err) {

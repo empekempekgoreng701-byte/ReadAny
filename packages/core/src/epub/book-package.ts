@@ -12,7 +12,7 @@
  *   translations restore in the reader via the existing paragraph cache.
  */
 
-import { BlobReader, TextWriter, ZipReader, configure } from "@zip.js/zip.js";
+import { TextWriter, Uint8ArrayReader, ZipReader, configure } from "@zip.js/zip.js";
 import type { ChapterParagraph } from "../translation/chapter-translator";
 import { normalizeParagraphText } from "../translation/translation-text";
 import {
@@ -25,9 +25,11 @@ import {
   parseXml,
   resolvePackagePath,
 } from "./inspect";
-import { toArrayBuffer } from "./zip";
 
-configure({ useWebWorkers: false });
+// Force the bundled pure-JS codec: whether Hermes provides a native
+// DecompressionStream varies by version, and a runtime-dependent branch here
+// would break chapter listing on exactly the devices we cannot debug locally.
+configure({ useWebWorkers: false, useCompressionStream: false });
 
 export interface PackageChapterRef {
   /** Zero-based spine position — matches reader sectionIndex + cache keys. */
@@ -138,8 +140,10 @@ function buildTitleMap(toc: EpubInspectTocItem[], packageDir: string): Map<strin
 }
 
 export async function openEpubPackage(bytes: Uint8Array): Promise<EpubPackageHandle> {
-  const buffer = toArrayBuffer(bytes);
-  const reader = new ZipReader(new BlobReader(new Blob([buffer])));
+  // Uint8ArrayReader (NOT BlobReader): the proven Android-safe primitive set is
+  // typed arrays only — `new Blob()`/FileReader behavior on Hermes is
+  // unverified, while Uint8Array needs no platform blob implementation.
+  const reader = new ZipReader(new Uint8ArrayReader(bytes));
   let closed = false;
   try {
     const entries = (await reader.getEntries()) as unknown as ZipEntrySized[];
@@ -175,24 +179,36 @@ export async function openEpubPackage(bytes: Uint8Array): Promise<EpubPackageHan
     const manifestById = new Map(manifestItems.map((item) => [item.id, item]));
     const entryPaths = entries.filter((entry) => !entry.directory).map((entry) => entry.filename);
 
-    // TOC (nav first, then NCX) for chapter titles.
+    // TOC (nav first, then NCX) for chapter titles. Best-effort ONLY: a
+    // malformed nav/NCX (common in fan-produced EPUBs) must degrade to
+    // `Section N` fallback titles, never fail the whole chapter list.
     let toc: EpubInspectTocItem[] = [];
-    const navItem = manifestItems.find((item) => item.properties?.split(/\s+/).includes("nav"));
-    if (navItem?.href) {
-      const navPath = findPackageResourcePath(entryPaths, packageDir, navItem.href);
-      const navXml = navPath ? await readTextEntry(navPath) : null;
-      if (navXml) toc = parseNavDocument(navXml);
+    try {
+      const navItem = manifestItems.find((item) =>
+        item.properties?.split(/\s+/).includes("nav"),
+      );
+      if (navItem?.href) {
+        const navPath = findPackageResourcePath(entryPaths, packageDir, navItem.href);
+        const navXml = navPath ? await readTextEntry(navPath) : null;
+        if (navXml) toc = parseNavDocument(navXml);
+      }
+    } catch {
+      toc = [];
     }
     if (toc.length === 0) {
-      const spineEl = elementsByLocalName(opfDoc, "spine")[0];
-      const tocId = spineEl?.getAttribute("toc") || undefined;
-      const ncxItem = tocId
-        ? manifestItems.find((item) => item.id === tocId)
-        : manifestItems.find((item) => item.mediaType === "application/x-dtbncx+xml");
-      if (ncxItem?.href) {
-        const ncxPath = findPackageResourcePath(entryPaths, packageDir, ncxItem.href);
-        const ncxXml = ncxPath ? await readTextEntry(ncxPath) : null;
-        if (ncxXml) toc = parseNcxDocument(ncxXml);
+      try {
+        const spineEl = elementsByLocalName(opfDoc, "spine")[0];
+        const tocId = spineEl?.getAttribute("toc") || undefined;
+        const ncxItem = tocId
+          ? manifestItems.find((item) => item.id === tocId)
+          : manifestItems.find((item) => item.mediaType === "application/x-dtbncx+xml");
+        if (ncxItem?.href) {
+          const ncxPath = findPackageResourcePath(entryPaths, packageDir, ncxItem.href);
+          const ncxXml = ncxPath ? await readTextEntry(ncxPath) : null;
+          if (ncxXml) toc = parseNcxDocument(ncxXml);
+        }
+      } catch {
+        toc = [];
       }
     }
     const titleMap = buildTitleMap(toc, packageDir);

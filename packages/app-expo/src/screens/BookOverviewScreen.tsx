@@ -70,7 +70,7 @@ function isLikelyRelativeAppPath(path: string): boolean {
 type ChapterLoadState =
   | { kind: "loading" }
   | { kind: "ready"; chapters: OverviewChapterRef[]; format: Book["format"] }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; detail?: string };
 
 const STATUS_META: Record<
   ChapterTranslationStatus,
@@ -212,9 +212,17 @@ export function BookOverviewScreen({ route, navigation }: Props) {
       } finally {
         await handle.close();
       }
-    } catch {
+    } catch (err) {
+      // Never swallow the root cause: log technical diagnostics (no book
+      // content, no personal data) so Android failures are actionable.
+      const name = err instanceof Error ? err.name : typeof err;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[BookOverview] chapter load failed: ${name}: ${message} ` +
+          `(format=${book?.format ?? "unknown"})`,
+      );
       if (mountedRef.current) {
-        setChaptersState({ kind: "error", message: "load-failed" });
+        setChaptersState({ kind: "error", message: "load-failed", detail: message });
       }
     }
   }, [book, resolveAbsolutePath]);
@@ -756,6 +764,18 @@ export function BookOverviewScreen({ route, navigation }: Props) {
               <Text style={{ color: colors.mutedForeground, marginBottom: 12 }}>
                 {t("overview.loadFailed", "Failed to load chapters")}
               </Text>
+              {typeof __DEV__ !== "undefined" && __DEV__ && chaptersState.detail ? (
+                <Text
+                  style={{
+                    color: colors.mutedForeground,
+                    fontSize: fontSize.xs,
+                    marginBottom: 12,
+                    opacity: 0.7,
+                  }}
+                >
+                  {chaptersState.detail}
+                </Text>
+              ) : null}
               <TouchableOpacity onPress={() => void loadChapters()} hitSlop={8}>
                 <Text style={{ color: colors.primary }}>{t("overview.retry", "Retry")}</Text>
               </TouchableOpacity>

@@ -50,7 +50,11 @@ import { getPlatformService } from "@readany/core/services";
 import { getCSSFontFace, useFontStore } from "@readany/core/stores";
 import type { HighlightColor, ReadSettings, TOCItem } from "@readany/core/types";
 import { eventBus } from "@readany/core/utils/event-bus";
-import { lruRecordDelete, lruRecordPut } from "@readany/core/utils/lru-record";
+import {
+  enforceByteLimit,
+  lruRecordDelete,
+  lruRecordPut,
+} from "@readany/core/utils/lru-record";
 import { throttle } from "@readany/core/utils/throttle";
 import { Asset } from "expo-asset";
 import * as DocumentPicker from "expo-document-picker";
@@ -343,13 +347,17 @@ export function ReaderScreen({ route, navigation }: Props) {
     },
     [],
   );
+  // ~24MB of base64 strings: the real OOM bound (entry counts alone cannot
+  // bound memory when values are ~1MB full-res images).
+  const IMAGE_DATA_MAP_BYTE_LIMIT = 24 * 1024 * 1024;
   const putImageData = useCallback((key: string, dataUrl: string) => {
     const version = imageGalleryVersionRef.current;
     setImageDataMap((prev) => {
       if (imageGalleryVersionRef.current !== version) return prev;
       // Bounded LRU (unit-tested core helper): hits promote, overflows evict
       // least-recently-used so visible/full-res images survive longest.
-      return lruRecordPut(prev, key, dataUrl, IMAGE_DATA_MAP_LIMIT);
+      const next = lruRecordPut(prev, key, dataUrl, IMAGE_DATA_MAP_LIMIT);
+      return enforceByteLimit(next, IMAGE_DATA_MAP_BYTE_LIMIT);
     });
   }, []);
   const requestGalleryThumb = useCallback(
@@ -648,6 +656,15 @@ export function ReaderScreen({ route, navigation }: Props) {
     [suppressProgressTracking],
   );
 
+  const goToFractionSafely = useCallback(
+    (fraction: number) => {
+      if (!Number.isFinite(fraction)) return;
+      suppressProgressTracking();
+      bridgeRef.current?.goToFraction(fraction);
+    },
+    [suppressProgressTracking],
+  );
+
   // ── Search ─────────────────────────────────────────────────────────────────
   // Use bridgeRef for lazy access (bridge is initialized later)
   const search = useReaderSearch({
@@ -728,6 +745,8 @@ export function ReaderScreen({ route, navigation }: Props) {
     },
     getCurrentCfi: () => currentCfi,
     goToCfi: (cfi) => bridgeRef.current?.goToCFI(cfi),
+    getCurrentFraction: () => progressRef.current,
+    goToFraction: (fraction) => goToFractionSafely(fraction),
     waitForLayoutStable: async () => {
       // Deterministic: two animation frames in RN + one WebView frame round-trip
       // instead of an arbitrary sleep.
@@ -910,7 +929,11 @@ export function ReaderScreen({ route, navigation }: Props) {
       if (sectionChanged) {
         currentSectionIndexRef.current = newSection;
         setCurrentSectionIndex(newSection);
-        setTranslationReady(false);
+        // Keep translation restore armed: relocate proves the new section is
+        // laid out, and the scroll-settled gate already prevents restore churn
+        // during fast scroll. Setting false here deadlocked restore for books
+        // opened past section 0 (no second same-section relocate ever fires).
+        setTranslationReady(true);
         void chapterTranslation.reset();
       }
 
