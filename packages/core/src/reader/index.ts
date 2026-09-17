@@ -49,3 +49,27 @@ export {
   unpinAlignedBrContainers,
 } from "./justified-text";
 export type { JustifyCapabilities } from "./justified-text";
+
+// Chapter separator (shared by mobile reader WebView; presentation-only,
+// CFI-safe: attributes + CSS, zero content nodes).
+export {
+  applyChapterSeparatorToDoc,
+  buildChapterSeparatorCss,
+  CHAPTER_DIVIDER_ATTR,
+  CHAPTER_SEPARATOR_STYLE_ID,
+  CHAPTER_SEPARATOR_TITLE_MAX_LENGTH,
+  CHAPTER_TITLE_ATTR,
+  installReadAnyChapterSeparator,
+  removeChapterSeparatorFromDoc,
+  resolveChapterTitle,
+  separatorIdentity,
+  shouldShowDivider,
+} from "./chapter-separator";
+export type {
+  ChapterSeparatorContext,
+  ChapterSeparatorIdentity,
+  ChapterSeparatorTocEntry,
+  ReadAnyChapterSeparatorApi,
+  SeparatorApplyResult,
+  SeparatorDocumentLike,
+} from "./chapter-separator";

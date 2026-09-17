@@ -110,26 +110,53 @@ async function hasAccessibleLocalFile(book: Book): Promise<boolean> {
   }
 }
 
+/**
+ * Single-tap entry: library book card → Book Overview (chapter list).
+ * Deep links (notes, chat) keep using {@link openMobileBook} (direct reader).
+ */
+export async function openBookOverview({
+  bookId,
+  navigation,
+  t,
+}: {
+  bookId: string;
+  navigation: MobileNavigation;
+  t: TFunction;
+}): Promise<boolean> {
+  return openMobileBook({ bookId, navigation, t, target: "overview" });
+}
+
 export async function openMobileBook({
   bookId,
   navigation,
   t,
   cfi,
   highlight,
+  target = "reader",
 }: {
   bookId: string;
   navigation: MobileNavigation;
   t: TFunction;
   cfi?: string;
   highlight?: boolean;
+  /** "overview" routes library single-taps to Book Overview (same checks). */
+  target?: "reader" | "overview";
 }): Promise<boolean> {
   const book = await resolveBookForOpen(bookId);
   if (!book) {
     return false;
   }
 
+  const goTarget = () => {
+    if (target === "overview") {
+      navigation.navigate("BookOverview", { bookId });
+    } else {
+      navigation.navigate("Reader", { bookId, cfi, highlight });
+    }
+  };
+
   if (book.syncStatus === "remote") {
-    navigation.navigate("Reader", { bookId, cfi, highlight });
+    goTarget();
     return true;
   }
 
@@ -144,7 +171,7 @@ export async function openMobileBook({
   // A soft-deleted book is no longer in the live store — even if the file
   // still exists on disk we must re-import so it rejoins the store.
   if (!book.deletedAt && (await hasAccessibleLocalFile(book))) {
-    navigation.navigate("Reader", { bookId, cfi, highlight });
+    goTarget();
     return true;
   }
 
@@ -205,7 +232,7 @@ export async function openMobileBook({
     if (!restoredBook) {
       return false;
     }
-    navigation.navigate("Reader", { bookId, cfi, highlight });
+    goTarget();
     return true;
   } catch (error) {
     const message =

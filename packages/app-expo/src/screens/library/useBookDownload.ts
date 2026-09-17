@@ -20,7 +20,7 @@ export function useBookDownload({ loadBooks, onSuccess }: UseBookDownloadOptions
 
   const downloadBook = useCallback(
     async (book: Book) => {
-      const bookTitle = book.meta.title || "未知书籍";
+      const bookTitle = book.meta.title || t("library.unknownBook", "Unknown book");
       setDownloadingBookId(book.id);
       setDownloadingBookTitle(bookTitle);
       setDownloadProgress(null);

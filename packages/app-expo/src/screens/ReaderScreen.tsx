@@ -50,6 +50,7 @@ import { getPlatformService } from "@readany/core/services";
 import { getCSSFontFace, useFontStore } from "@readany/core/stores";
 import type { HighlightColor, ReadSettings, TOCItem } from "@readany/core/types";
 import { eventBus } from "@readany/core/utils/event-bus";
+import { lruRecordDelete, lruRecordPut } from "@readany/core/utils/lru-record";
 import { throttle } from "@readany/core/utils/throttle";
 import { Asset } from "expo-asset";
 import * as DocumentPicker from "expo-document-picker";
@@ -224,7 +225,14 @@ export function ReaderScreen({ route, navigation }: Props) {
   const colors = useColors();
   const { mode: themeMode } = useTheme();
   const s = makeStyles(colors);
-  const { bookId, cfi, highlight: shouldHighlight, openTTS } = route.params;
+  const {
+    bookId,
+    cfi,
+    href: initialHref,
+    highlight: shouldHighlight,
+    openTTS,
+    openSearch: shouldOpenSearch,
+  } = route.params;
   const { t, i18n } = useTranslation();
   const isWideLayout = SCREEN_WIDTH >= 768;
   const isIPadLayout = Platform.OS === "ios" && Platform.isPad;
@@ -289,56 +297,100 @@ export function ReaderScreen({ route, navigation }: Props) {
   const viewerIndexRef = useRef<number | null>(null);
   viewerIndexRef.current = viewerIndex;
 
-  // Phase 7: gallery helpers — lazy thumb/full + lompat lokasi
-  // Phase 11 §2-§3: imageDataMap bounded LRU (150 entries). Full-res viewer
-  // shares the same entry; it is evicted on close (see closeImageViewer).
-  const IMAGE_DATA_MAP_LIMIT = 150;
+  // Gallery helpers — metadata first, lazy thumb, full-res on demand (P0-6).
+  // Bounded LRU + stale-request guards: old image callbacks must never mutate
+  // a destroyed gallery or a newly opened book.
+  const IMAGE_DATA_MAP_LIMIT = 100;
+  const MAX_IMAGE_IN_FLIGHT = 4;
+  const IMAGE_RETRY_QUEUE_LIMIT = 20;
+  const imageGalleryVersionRef = useRef(0);
+  // Generation of the last gallery scan request; stale scan callbacks are ignored.
+  const imageGalleryRequestVersionRef = useRef(0);
+  // Retry queue for image requests dropped while all slots are busy (P0: dropped
+  // thumbs were lost forever because viewability rarely refires).
+  const imageRetryQueueRef = useRef<
+    Array<{ key: string; sectionIndex: number; imgIndex: number; maxDim: number }>
+  >([]);
+  const enqueueImageRequest = (entry: {
+    key: string;
+    sectionIndex: number;
+    imgIndex: number;
+    maxDim: number;
+  }) => {
+    const q = imageRetryQueueRef.current;
+    if (q.some((e) => e.key === entry.key && e.maxDim === entry.maxDim)) return;
+    q.push(entry);
+    if (q.length > IMAGE_RETRY_QUEUE_LIMIT) q.shift();
+  };
+  // Dequeue while slots are free. `cache` must be a fresh map snapshot.
+  const pumpImageRetryQueue = (cache: Record<string, string>) => {
+    const q = imageRetryQueueRef.current;
+    while (q.length > 0 && imageDataPendingRef.current.size < MAX_IMAGE_IN_FLIGHT) {
+      const next = q.shift();
+      if (!next || cache[next.key] || imageDataPendingRef.current.has(next.key)) continue;
+      imageDataPendingRef.current.add(next.key);
+      bridgeRef.current?.requestImageData(next.sectionIndex, next.imgIndex, next.maxDim);
+    }
+  };
+  const imageKeyFor = useCallback(
+    (sectionIndex: number, imgIndex: number) => {
+      const item = imageItemsRef.current.find(
+        (it) => it.sectionIndex === sectionIndex && it.imgIndex === imgIndex,
+      );
+      if (item?.cfi) return `cfi:${item.cfi}`;
+      const alt = (item?.alt || "").trim().slice(0, 32).replace(/[^a-zA-Z0-9_-]/g, "_");
+      return `sec:${sectionIndex}:idx:${imgIndex}${alt ? `:alt:${alt}` : ""}`;
+    },
+    [],
+  );
   const putImageData = useCallback((key: string, dataUrl: string) => {
+    const version = imageGalleryVersionRef.current;
     setImageDataMap((prev) => {
-      if (prev[key]) return prev;
-      const keys = Object.keys(prev);
-      if (keys.length < IMAGE_DATA_MAP_LIMIT) return { ...prev, [key]: dataUrl };
-      // Evict oldest-inserted first (insertion-ordered object keys)
-      const next: Record<string, string> = {};
-      const drop = keys.length - IMAGE_DATA_MAP_LIMIT + 1;
-      for (let i = drop; i < keys.length; i++) {
-        const k = keys[i];
-        const v = k !== undefined ? prev[k] : undefined;
-        if (k !== undefined && v !== undefined) next[k] = v;
-      }
-      next[key] = dataUrl;
-      return next;
+      if (imageGalleryVersionRef.current !== version) return prev;
+      // Bounded LRU (unit-tested core helper): hits promote, overflows evict
+      // least-recently-used so visible/full-res images survive longest.
+      return lruRecordPut(prev, key, dataUrl, IMAGE_DATA_MAP_LIMIT);
     });
   }, []);
   const requestGalleryThumb = useCallback(
     (sectionIndex: number, imgIndex: number) => {
-      const key = `${sectionIndex}:${imgIndex}`;
-      if (imageDataMap[key] || imageDataPendingRef.current.has(key)) return;
-      imageDataPendingRef.current.add(key);
+      const key = imageKeyFor(sectionIndex, imgIndex);
+      const legacy = `${sectionIndex}:${imgIndex}`;
+      if (imageDataMap[key] || imageDataMap[legacy]) return;
+      // Pending + map share ONE key (legacy): onImageData deletes exactly this
+      // key, so the in-flight flag always drains. The previous stable-key add
+      // never matched the legacy-key delete and wedged the 4-slot window.
+      if (imageDataPendingRef.current.has(legacy)) return;
+      if (imageDataPendingRef.current.size >= MAX_IMAGE_IN_FLIGHT) {
+        enqueueImageRequest({ key: legacy, sectionIndex, imgIndex, maxDim: 240 });
+        return;
+      }
+      imageDataPendingRef.current.add(legacy);
       bridgeRef.current?.requestImageData(sectionIndex, imgIndex, 240);
     },
-    [imageDataMap],
+    [imageDataMap, imageKeyFor],
   );
-  // Phase 11 §2: bebaskan full-res saat viewer tutup.
+  // Bebaskan full-res saat viewer tutup.
   const closeImageViewer = useCallback(() => {
     const idx = viewerIndexRef.current;
     setViewerIndex(null);
     if (idx != null) {
       const item = imageItemsRef.current[idx];
       if (item) {
-        const key = `${item.sectionIndex}:${item.imgIndex}`;
+        const key = item.cfi ? `cfi:${item.cfi}` : `${item.sectionIndex}:${item.imgIndex}`;
+        const stable = imageKeyFor(item.sectionIndex, item.imgIndex);
         imageDataPendingRef.current.delete(key);
-        setImageDataMap((prev) => {
-          if (!prev[key]) return prev;
-          const next = { ...prev };
-          delete next[key];
-          return next;
-        });
+        imageDataPendingRef.current.delete(stable);
+        setImageDataMap((prev) => lruRecordDelete(prev, [key, stable]));
       }
     }
-  }, []);
+  }, [imageKeyFor]);
   const openGalleryTab = useCallback(() => {
     if (imageItems.length === 0 && imageProgress == null) {
+      imageGalleryVersionRef.current += 1;
+      imageGalleryRequestVersionRef.current = imageGalleryVersionRef.current;
+      imageDataPendingRef.current.clear();
+      imageRetryQueueRef.current.length = 0;
       bridgeRef.current?.requestImageGallery();
     }
   }, [imageItems.length, imageProgress]);
@@ -347,16 +399,28 @@ export function ReaderScreen({ route, navigation }: Props) {
       const item = imageItems[index];
       if (!item) return;
       setViewerIndex(index);
-      const key = `${item.sectionIndex}:${item.imgIndex}`;
-      if (!imageDataMap[key] && !imageDataPendingRef.current.has(key)) {
-        imageDataPendingRef.current.add(key);
-        bridgeRef.current?.requestImageData(item.sectionIndex, item.imgIndex, 1600);
+      const key = imageKeyFor(item.sectionIndex, item.imgIndex);
+      const legacy = `${item.sectionIndex}:${item.imgIndex}`;
+      if (imageDataMap[key] || imageDataMap[legacy]) return;
+      // Same single-key rule as thumbs (see requestGalleryThumb).
+      if (imageDataPendingRef.current.has(legacy)) return;
+      if (imageDataPendingRef.current.size >= MAX_IMAGE_IN_FLIGHT) {
+        enqueueImageRequest({
+          key: legacy,
+          sectionIndex: item.sectionIndex,
+          imgIndex: item.imgIndex,
+          maxDim: 1600,
+        });
+        return;
       }
+      imageDataPendingRef.current.add(legacy);
+      bridgeRef.current?.requestImageData(item.sectionIndex, item.imgIndex, 1600);
     },
-    [imageItems, imageDataMap],
+    [imageItems, imageDataMap, imageKeyFor],
   );
   const goToGalleryImage = useCallback(
     (sectionIndex: number, imgIndex: number) => {
+      // TAP = navigate to reader location (never auto-zoom).
       setViewerIndex(null);
       setShowTOC(false);
       bridgeRef.current?.goToImageLocation(sectionIndex, imgIndex);
@@ -448,6 +512,10 @@ export function ReaderScreen({ route, navigation }: Props) {
 
   // Chapter translation state
   const [currentSectionIndex, setCurrentSectionIndex] = useState(0);
+  const currentSectionIndexRef = useRef(0);
+  useEffect(() => {
+    currentSectionIndexRef.current = currentSectionIndex;
+  }, [currentSectionIndex]);
   const chapterTranslationBridgeRef = useRef<{
     getChapterParagraphs: (
       sectionIndex?: number,
@@ -505,6 +573,7 @@ export function ReaderScreen({ route, navigation }: Props) {
   const progressRef = useRef(0);
   const locationHistoryRef = useRef<string[]>([]);
   const lastNavigatedCfiRef = useRef<string | undefined>(undefined);
+  const lastNavigatedHrefRef = useRef<string | undefined>(undefined);
   const fileServerRef = useRef<string | null>(null);
   const sessionProgressRef = useRef<{
     mode: "location" | "page" | "characters";
@@ -584,9 +653,15 @@ export function ReaderScreen({ route, navigation }: Props) {
   const search = useReaderSearch({
     currentCfi,
     bridge: {
-      search: (q) => bridgeRef.current?.search?.(q),
+      // NOTE: every hook capability must be forwarded. Previously
+      // goToSearchMatch/ensureBookTextCache/opts were dropped here, which
+      // silently disabled result taps, prev/next, search prewarm, and
+      // match-case/whole-word/direction options.
+      search: (q, opts) => bridgeRef.current?.search?.(q, opts),
       clearSearch: () => bridgeRef.current?.clearSearch?.(),
       navigateSearch: (idx) => bridgeRef.current?.navigateSearch?.(idx),
+      goToSearchMatch: (s, b, o) => bridgeRef.current?.goToSearchMatch?.(s, b, o),
+      ensureBookTextCache: () => bridgeRef.current?.ensureBookTextCache?.(),
       goToCFI: (cfi) => goToCFISafely(cfi),
     },
   });
@@ -599,8 +674,11 @@ export function ReaderScreen({ route, navigation }: Props) {
     sessionProgressRef.current = null;
     totalBookCharactersRef.current = null;
     suppressProgressTracking(INITIAL_PROGRESS_RESTORE_GUARD_MS);
-    // Phase 11 §2: drop previous book's image state (thumbs + pending + viewer)
+    // Drop previous book's image state (thumbs + pending + viewer) and
+    // invalidate stale callbacks via version bump.
+    imageGalleryVersionRef.current += 1;
     imageDataPendingRef.current.clear();
+    imageRetryQueueRef.current.length = 0;
     setImageDataMap({});
     setImageItems([]);
     setImageProgress(null);
@@ -609,64 +687,53 @@ export function ReaderScreen({ route, navigation }: Props) {
   const chapterTranslation = useChapterTranslation({
     bookId,
     sectionIndex: currentSectionIndex,
+    chapterHref: toc?.[currentSectionIndex]?.href,
+    chapterId: String(currentSectionIndex),
     aiConfig,
     ready: translationReady && scrollSettled,
     translationConfig,
-    getParagraphs: async () => {
+    getParagraphs: async (section) => {
       if (!chapterTranslationBridgeRef.current) return [];
       // Pass the section index so the WebView extracts from the chapter
       // actually being read — not contents[0] (often a preloaded neighbor).
-      return chapterTranslationBridgeRef.current.getChapterParagraphs(currentSectionIndex);
+      const target = typeof section === "number" ? section : currentSectionIndex;
+      return chapterTranslationBridgeRef.current.getChapterParagraphs(target);
     },
-    injectTranslations: (results, visibility) => {
+    injectTranslations: (results, visibility, section) => {
+      const target = typeof section === "number" ? section : currentSectionIndex;
+      // Guard: never inject a stale chapter's results into the current chapter.
+      if (target !== currentSectionIndexRef.current) return Promise.resolve();
       return chapterTranslationBridgeRef.current?.injectChapterTranslations(
         results,
         visibility,
-        currentSectionIndex,
+        target,
       );
     },
-    removeTranslations: () => {
-      chapterTranslationBridgeRef.current?.removeChapterTranslations(currentSectionIndex);
+    removeTranslations: (section) => {
+      const target = typeof section === "number" ? section : currentSectionIndex;
+      chapterTranslationBridgeRef.current?.removeChapterTranslations(target);
     },
-    applyVisibility: (originalVisible, translationVisible) => {
-      const translationHidden = !translationVisible;
-      const originalHidden = !originalVisible;
-      const solo = !originalVisible && translationVisible;
-      bridge.webViewRef.current?.injectJavaScript(`
-        (function() {
-          try {
-            var doc = null;
-            var renderer = typeof view !== 'undefined' && view && view.renderer;
-            if (renderer && renderer.getContents) {
-              var contents = renderer.getContents();
-              if (contents && contents[0] && contents[0].doc) doc = contents[0].doc;
-            }
-            if (!doc) {
-              var iframes = document.querySelectorAll('iframe');
-              for (var fi = 0; fi < iframes.length; fi++) {
-                try {
-                  var iframeDoc = iframes[fi].contentDocument || (iframes[fi].contentWindow && iframes[fi].contentWindow.document);
-                  if (iframeDoc && iframeDoc.body) { doc = iframeDoc; break; }
-                } catch (e) {}
-              }
-            }
-            if (!doc) return;
-            var els = doc.querySelectorAll('.readany-translation');
-            for (var i = 0; i < els.length; i++) {
-              els[i].setAttribute('data-hidden', '${translationHidden}');
-              els[i].setAttribute('data-solo', '${solo}');
-            }
-            var origEls = doc.querySelectorAll('[data-translate-id]');
-            for (var j = 0; j < origEls.length; j++) {
-              origEls[j].setAttribute('data-original-hidden', '${originalHidden}');
-            }
-          } catch(e) {}
-        })();
-        true;
-      `);
+    applyVisibility: (originalVisible, translationVisible, section) => {
+      const target = typeof section === "number" ? section : currentSectionIndex;
+      const bridgeAny = bridge as unknown as {
+        applyChapterTranslationVisibility?: (
+          o: boolean,
+          t: boolean,
+          s?: number,
+        ) => void;
+      };
+      if (bridgeAny.applyChapterTranslationVisibility) {
+        bridgeAny.applyChapterTranslationVisibility(originalVisible, translationVisible, target);
+      }
     },
     getCurrentCfi: () => currentCfi,
     goToCfi: (cfi) => bridgeRef.current?.goToCFI(cfi),
+    waitForLayoutStable: async () => {
+      // Deterministic: two animation frames in RN + one WebView frame round-trip
+      // instead of an arbitrary sleep.
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    },
   });
 
   useEffect(() => {
@@ -841,9 +908,10 @@ export function ReaderScreen({ route, navigation }: Props) {
       }
       
       if (sectionChanged) {
+        currentSectionIndexRef.current = newSection;
         setCurrentSectionIndex(newSection);
         setTranslationReady(false);
-        chapterTranslation.reset();
+        void chapterTranslation.reset();
       }
 
       // Only update if values actually changed
@@ -1040,17 +1108,30 @@ export function ReaderScreen({ route, navigation }: Props) {
       setSpeedReadProgress({ index: detail.index, total: detail.total });
     },
     onImageGallery: (detail) => {
+      // Ignore stale scans (e.g. previous book's late arrival).
+      if (imageGalleryVersionRef.current !== imageGalleryRequestVersionRef.current) return;
       setImageItems(detail.items);
       setImageProgress(null);
     },
     onImageGalleryProgress: (progress: number) => {
+      if (imageGalleryVersionRef.current !== imageGalleryRequestVersionRef.current) return;
       setImageProgress(progress >= 1 ? null : progress);
     },
+    onImageGalleryError: () => {
+      if (imageGalleryVersionRef.current !== imageGalleryRequestVersionRef.current) return;
+      // Terminal scan failure: clear the spinner so reopening the tab retries.
+      setImageProgress(null);
+    },
     onImageData: (detail) => {
-      if (!detail.dataUrl) return;
       const key = `${detail.sectionIndex}:${detail.imgIndex}`;
       imageDataPendingRef.current.delete(key);
+      if (!detail.dataUrl) {
+        // Error replies must also free the slot (previously leaked) and pump retries.
+        pumpImageRetryQueue(imageDataMap);
+        return;
+      }
       putImageData(key, detail.dataUrl);
+      pumpImageRetryQueue(imageDataMap);
     },
     onImageTap: (detail) => {
       // Tap gambar di reader → buka fullscreen viewer di gambar tsb bila ada di gallery
@@ -1364,6 +1445,10 @@ export function ReaderScreen({ route, navigation }: Props) {
       }
       const { useSyncStore } = require("@readany/core/stores/sync-store");
       useSyncStore.getState().syncNow?.();
+      // Reader unmount: invalidate in-flight image work (refs only, no setState).
+      imageGalleryVersionRef.current += 1;
+      imageDataPendingRef.current.clear();
+      imageRetryQueueRef.current.length = 0;
     };
   }, [bookId]);
 
@@ -1380,7 +1465,9 @@ export function ReaderScreen({ route, navigation }: Props) {
         const platform = getPlatformService();
         const appData = await platform.getAppDataDir();
         const absPath = await platform.joinPath(appData, book.filePath);
-        const lastLocation = book.currentCfi || undefined;
+        // Open directly at the requested CFI (e.g. from a note/highlight tap)
+        // instead of saved progress + a second seek — one layout, not two.
+        const lastLocation = cfi || book.currentCfi || undefined;
         const fileName = book.filePath.split("/").pop() || "book.epub";
         const mimeType = BOOK_FORMAT_MIME_TYPES[book.format] || "application/octet-stream";
 
@@ -1551,6 +1638,7 @@ export function ReaderScreen({ route, navigation }: Props) {
   // Reset last navigated CFI when book changes
   useEffect(() => {
     lastNavigatedCfiRef.current = undefined;
+    lastNavigatedHrefRef.current = undefined;
   }, [bookId]);
 
   // Navigate to CFI when book is loaded (from NotesPage or AI citation navigation)
@@ -1571,6 +1659,23 @@ export function ReaderScreen({ route, navigation }: Props) {
       setTimeout(doFlash, 100);
     }
   }, [webViewReady, loading, cfi, shouldHighlight, goToCFISafely, navigation, bookId]);
+
+  // Navigate to a chapter href when launched from Book Overview chapter tap.
+  // CFI (exact location) always wins when both are present.
+  useEffect(() => {
+    if (!webViewReady || loading || cfi) return;
+    if (!initialHref || initialHref === lastNavigatedHrefRef.current) return;
+    goToHrefSafely(initialHref);
+    lastNavigatedHrefRef.current = initialHref;
+    navigation.setParams({ bookId, href: undefined });
+  }, [webViewReady, loading, cfi, initialHref, goToHrefSafely, navigation, bookId]);
+
+  // Open the search panel when launched from Book Overview search.
+  useEffect(() => {
+    if (!shouldOpenSearch || !webViewReady || loading) return;
+    setShowSearch(true);
+    navigation.setParams({ bookId, openSearch: undefined });
+  }, [shouldOpenSearch, webViewReady, loading, navigation, bookId]);
 
   // Open TTS lyrics page when navigating from notification
   useEffect(() => {
@@ -2705,10 +2810,18 @@ export function ReaderScreen({ route, navigation }: Props) {
             const item = viewerIndex != null ? imageItems[viewerIndex] : null;
             if (item) {
               const key = `${item.sectionIndex}:${item.imgIndex}`;
-              if (!imageDataMap[key] && !imageDataPendingRef.current.has(key)) {
-                imageDataPendingRef.current.add(key);
-                bridgeRef.current?.requestImageData(item.sectionIndex, item.imgIndex, 1600);
+              if (imageDataMap[key] || imageDataPendingRef.current.has(key)) return;
+              if (imageDataPendingRef.current.size >= MAX_IMAGE_IN_FLIGHT) {
+                enqueueImageRequest({
+                  key,
+                  sectionIndex: item.sectionIndex,
+                  imgIndex: item.imgIndex,
+                  maxDim: 1600,
+                });
+                return;
               }
+              imageDataPendingRef.current.add(key);
+              bridgeRef.current?.requestImageData(item.sectionIndex, item.imgIndex, 1600);
             }
           }}
         />
@@ -2764,7 +2877,16 @@ export function ReaderScreen({ route, navigation }: Props) {
           {highlights.length > 0 ? (
             <ScrollView showsVerticalScrollIndicator={false} style={s.sheetScroll}>
               {highlights.map((h) => (
-                <View key={h.id} style={s.highlightItem}>
+                <TouchableOpacity
+                  key={h.id}
+                  style={s.highlightItem}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    // Tap note/highlight → jump straight to its CFI location.
+                    setShowNotebook(false);
+                    if (h.cfi) goToCFISafely(h.cfi);
+                  }}
+                >
                   <View
                     style={[
                       s.highlightColorDot,
@@ -2790,7 +2912,7 @@ export function ReaderScreen({ route, navigation }: Props) {
                     </Text>
                     {h.note && <Text style={s.highlightNote}>{h.note}</Text>}
                   </View>
-                </View>
+                </TouchableOpacity>
               ))}
             </ScrollView>
           ) : (

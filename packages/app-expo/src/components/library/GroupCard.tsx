@@ -2,6 +2,7 @@ import { FolderIcon, MoreVerticalIcon } from "@/components/ui/Icon";
 import { type ThemeColors, radius, useColors } from "@/styles/theme";
 import { getPlatformService } from "@readany/core/services";
 import type { Book, BookGroup } from "@readany/core/types";
+import { decodeXmlEntitiesOnce } from "@readany/core/utils";
 import { memo, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Image, StyleSheet, Text, TouchableOpacity, View } from "react-native";
@@ -121,14 +122,14 @@ function GroupCoverLayer({
           <View style={bookStyles.fallbackContentOverlay}>
             <View style={bookStyles.fallbackTitleWrap}>
               <Text style={bookStyles.fallbackTitle} numberOfLines={3}>
-                {book.meta.title}
+                {decodeXmlEntitiesOnce(book.meta.title)}
               </Text>
             </View>
             <View style={bookStyles.fallbackDivider} />
             {book.meta.author ? (
               <View style={bookStyles.fallbackAuthorWrap}>
                 <Text style={bookStyles.fallbackAuthor} numberOfLines={1}>
-                  {book.meta.author}
+                  {book.meta.author ? decodeXmlEntitiesOnce(book.meta.author) : null}
                 </Text>
               </View>
             ) : null}

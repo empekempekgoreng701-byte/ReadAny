@@ -139,7 +139,15 @@
     "systemVoiceNote": "Choose the system voice in your device settings",
     "browserVoiceNote": "Choose the system voice in your device settings",
     "stop": "Stop",
-    "noTextFound": "No readable text found on this page"
+    "noTextFound": "No readable text found on this page",
+    "sleepTimerPauseMode": "Pause (resumable)",
+    "sleepTimerStopMode": "Stop",
+    "sourceFromSelection": "From selected text",
+    "sourceFromPage": "From current page",
+    "engineEdgeDesc": "Microsoft · Multilingual",
+    "engineDashscopeDesc": "Alibaba Cloud Tongyi · Chinese optimized",
+    "engineOpenaiDesc": "Custom OpenAI-compatible",
+    "engineSystemDesc": "Built-in · Free"
   },
   "fonts": {
     "title": "Fonts",

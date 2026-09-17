@@ -242,7 +242,8 @@ describe("reader-side justified text helper", () => {
 
   it("falls back to the manual scan when querySelectorAll rejects :has()", () => {
     const centered = new FakeContainer("center", true);
-    const doc = new FakeDoc([centered], { failHasQuery: true });
+    const doc = new FakeDoc([centered]);
+    doc.failHasQuery = true;
 
     applyJustifiedText(asDoc(doc), true, false);
 

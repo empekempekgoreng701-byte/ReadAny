@@ -17,6 +17,10 @@
     "start": "Start Vectorization",
     "notConfigured": "Please configure a vector model first",
     "notConfiguredDesc": "You need to download a built-in model or configure a remote vector model before vectorizing.",
-    "goSettings": "Go to Settings"
+    "goSettings": "Go to Settings",
+    "missingFileDesc": "The local book file is missing. Please download or re-import it.",
+    "prepareFailed": "Failed to prepare vectorization.",
+    "unsupportedFormatDesc": "Mobile vectorization currently supports EPUB, PDF, TXT, and UMD books.",
+    "unsupportedFormatTitle": "Unsupported format"
   }
 }

@@ -1,13 +1,13 @@
 import { CheckIcon, ClockIcon, Loader2Icon, MoreVerticalIcon } from "@/components/ui/Icon";
+import { useResolvedCoverUrl } from "@/hooks/use-resolved-cover-url";
 import { useColors } from "@/styles/theme";
 import { FAVORITE_TAG } from "@/stores/library-store";
-import { getPlatformService } from "@readany/core/services";
 /**
  * BookCard — Touch-optimized book card matching Tauri mobile MobileBookCard exactly.
  * Cover (28:41), progress bar, vectorization overlay, tag badges, long-press action sheet.
  */
 import type { Book } from "@readany/core/types";
-import { getBookProgressPercent } from "@readany/core/utils";
+import { decodeXmlEntitiesOnce, getBookProgressPercent } from "@readany/core/utils";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -89,34 +89,10 @@ export const BookCard = memo(function BookCard({
   const [imageError, setImageError] = useState(false);
   const [showActions, setShowActions] = useState(false);
   const [actionAnchor, setActionAnchor] = useState<LayoutRectangle | null>(null);
-  const [resolvedCoverUrl, setResolvedCoverUrl] = useState<string | undefined>(undefined);
+  const resolvedCoverUrl = useResolvedCoverUrl(book.meta.coverUrl);
   const coverRef = useRef<View>(null);
   const menuTriggerRef = useRef<View>(null);
   const suppressOpenUntilRef = useRef(0);
-
-  // Resolve relative coverUrl to absolute path
-  useEffect(() => {
-    const raw = book.meta.coverUrl;
-    if (!raw) {
-      setResolvedCoverUrl(undefined);
-      return;
-    }
-    if (raw.startsWith("http") || raw.startsWith("blob") || raw.startsWith("file")) {
-      setResolvedCoverUrl(raw);
-      return;
-    }
-    (async () => {
-      try {
-        const platform = getPlatformService();
-        const appData = await platform.getAppDataDir();
-        const absPath = await platform.joinPath(appData, raw);
-        setResolvedCoverUrl(absPath);
-      } catch (err) {
-        console.warn("[Library] Failed to resolve cover URL:", err);
-        setResolvedCoverUrl(undefined);
-      }
-    })();
-  }, [book.meta.coverUrl]);
 
   const progressPct = getBookProgressPercent(book.progress);
 
@@ -266,15 +242,15 @@ export const BookCard = memo(function BookCard({
               <View style={s.fallbackGradientBottom} />
               <View style={s.fallbackContentOverlay}>
                 <View style={s.fallbackTitleWrap}>
-                  <Text style={s.fallbackTitle} numberOfLines={3}>
-                    {book.meta.title}
-                  </Text>
+                    <Text style={s.fallbackTitle} numberOfLines={3}>
+                      {decodeXmlEntitiesOnce(book.meta.title)}
+                    </Text>
                 </View>
                 <View style={s.fallbackDivider} />
                 {book.meta.author ? (
                   <View style={s.fallbackAuthorWrap}>
                     <Text style={s.fallbackAuthor} numberOfLines={1}>
-                      {book.meta.author}
+                      {book.meta.author ? decodeXmlEntitiesOnce(book.meta.author) : null}
                     </Text>
                   </View>
                 ) : null}
@@ -375,7 +351,7 @@ export const BookCard = memo(function BookCard({
           </View>
           {book.meta.author ? (
             <Text style={s.bookAuthor} numberOfLines={1}>
-              {book.meta.author}
+              {decodeXmlEntitiesOnce(book.meta.author)}
             </Text>
           ) : null}
 

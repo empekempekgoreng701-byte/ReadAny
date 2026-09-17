@@ -1,5 +1,6 @@
 import { DOMParser } from "@xmldom/xmldom";
 import { BlobReader, TextWriter, ZipReader, configure } from "@zip.js/zip.js";
+import { decodeXmlEntitiesOnce } from "../utils/text-entities";
 import { toArrayBuffer } from "./zip";
 
 export type EpubInspectManifestItem = {
@@ -121,11 +122,11 @@ function createEntryReader(entries: ZipEntryLike[]) {
   };
 }
 
-function parseXml(xml: string): Document {
+export function parseXml(xml: string): Document {
   return new DOMParser().parseFromString(xml, "application/xml") as unknown as Document;
 }
 
-function elementsByLocalName(root: Document | Element, localName?: string): Element[] {
+export function elementsByLocalName(root: Document | Element, localName?: string): Element[] {
   const elements = Array.from(root.getElementsByTagName("*"));
   if (!localName || localName === "*") return elements;
   return elements.filter((element) => element.localName === localName);
@@ -200,15 +201,20 @@ async function inspectPackageDocument(options: {
 function parseMetadata(doc: Document): EpubInspectResult["metadata"] {
   const metadata = elementsByLocalName(doc, "metadata")[0] ?? doc.documentElement;
   const metadataElements = elementsByLocalName(metadata);
+  // Decode once: some producers double-escape OPF text (e.g. creator stored
+  // as `&lt;unknown&gt;`), which would otherwise render verbatim in the UI.
+  const clean = (value: string | null | undefined) => {
+    const trimmed = value?.trim();
+    return trimmed ? decodeXmlEntitiesOnce(trimmed) : undefined;
+  };
   const textByLocalName = (localName: string) =>
-    metadataElements.find((element) => element.localName === localName)?.textContent?.trim() ||
-    undefined;
+    clean(metadataElements.find((element) => element.localName === localName)?.textContent);
   const metaByProperty = (property: string) =>
-    metadataElements
-      .find(
+    clean(
+      metadataElements.find(
         (element) => element.localName === "meta" && element.getAttribute("property") === property,
-      )
-      ?.textContent?.trim() || undefined;
+      )?.textContent,
+    );
 
   return {
     title: textByLocalName("title"),
@@ -220,7 +226,7 @@ function parseMetadata(doc: Document): EpubInspectResult["metadata"] {
     modified: metaByProperty("dcterms:modified"),
     subjects: metadataElements
       .filter((element) => element.localName === "subject")
-      .map((element) => element.textContent?.trim() || "")
+      .map((element) => clean(element.textContent) || "")
       .filter(Boolean),
   };
 }
@@ -253,7 +259,7 @@ async function extractTocItems(options: {
   return [];
 }
 
-function parseNavDocument(navXml: string): EpubInspectTocItem[] {
+export function parseNavDocument(navXml: string): EpubInspectTocItem[] {
   const doc = parseXml(navXml);
   const navs = elementsByLocalName(doc, "nav");
   const tocNav =
@@ -277,7 +283,7 @@ function collectNavLinks(element: Element, level: number, items: EpubInspectTocI
   }
 }
 
-function parseNcxDocument(ncxXml: string): EpubInspectTocItem[] {
+export function parseNcxDocument(ncxXml: string): EpubInspectTocItem[] {
   const doc = parseXml(ncxXml);
   return elementsByLocalName(doc, "navPoint").map((navPoint) => ({
     label:

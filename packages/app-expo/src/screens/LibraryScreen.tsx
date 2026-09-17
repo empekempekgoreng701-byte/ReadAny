@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/Icon";
 import { SyncButton } from "@/components/ui/SyncButton";
 import { useResponsiveLayout } from "@/hooks/use-responsive-layout";
-import { openMobileBook } from "@/lib/library/open-mobile-book";
+import { openBookOverview } from "@/lib/library/open-mobile-book";
 import { setCallback, setExtractorRef } from "@/lib/rag/auto-vectorize-service";
 import type { RootStackParamList } from "@/navigation/RootNavigator";
 import { WebDavConnectSheet } from "@/screens/library/WebDavConnectSheet";
@@ -576,10 +576,16 @@ export function LibraryScreen() {
         Keyboard.dismiss();
       }
       if (book.syncStatus === "remote") {
-        await downloadBook(book);
+        // Open the overview immediately after a successful download instead
+        // of leaving the user on a seemingly dead card (single tap always
+        // lands on Book Overview, never directly in the reader).
+        const downloaded = await downloadBook(book);
+        if (downloaded) {
+          await openBookOverview({ bookId: book.id, navigation: nav, t });
+        }
         return;
       }
-      await openMobileBook({ bookId: book.id, navigation: nav, t });
+      await openBookOverview({ bookId: book.id, navigation: nav, t });
     },
     [downloadBook, nav, t, showSearch, searchAnim, setFilter],
   );

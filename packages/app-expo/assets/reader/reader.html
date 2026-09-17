@@ -367,6 +367,192 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
 </script>
 
   <script>
+(() => {
+  // ../core/src/reader/chapter-separator.ts
+  var CHAPTER_SEPARATOR_STYLE_ID = "readany-chapter-separator-style";
+  var CHAPTER_DIVIDER_ATTR = "data-chapter-divider";
+  var CHAPTER_TITLE_ATTR = "data-chapter-title";
+  var CHAPTER_SEPARATOR_TITLE_MAX_LENGTH = 140;
+  function shouldShowDivider(ctx) {
+    if (!ctx || ctx.disabled || ctx.isFixedLayout) return false;
+    const index = Math.floor(Number(ctx.sectionIndex));
+    return Number.isInteger(index) && index > 0;
+  }
+  function normalizeTitleLabel(label) {
+    if (!label) return null;
+    const collapsed = String(label).replace(/\s+/g, " ").trim();
+    if (!collapsed) return null;
+    return collapsed.length > CHAPTER_SEPARATOR_TITLE_MAX_LENGTH ? `${collapsed.slice(0, CHAPTER_SEPARATOR_TITLE_MAX_LENGTH - 1).trimEnd()}\u2026` : collapsed;
+  }
+  function stripFragment(href) {
+    if (!href) return null;
+    const base = String(href).split("#")[0];
+    return base || null;
+  }
+  function resolveChapterTitle(sectionIndex, sectionHref, toc) {
+    if (!toc || !toc.length) return null;
+    const index = Math.floor(Number(sectionIndex));
+    const href = sectionHref != null ? String(sectionHref) : null;
+    const base = stripFragment(href);
+    const visit = (items) => {
+      let byIndex = null;
+      let byHref = null;
+      let byBase = null;
+      const stack = [items];
+      while (stack.length > 0) {
+        const current = stack.pop();
+        for (const item of current) {
+          if (!item) continue;
+          const label = normalizeTitleLabel(item.label);
+          if (label) {
+            if (byIndex == null && item.index != null && Number(item.index) === index) {
+              byIndex = label;
+            }
+            const itemHref = item.href != null ? String(item.href) : null;
+            if (byHref == null && href != null && itemHref === href) {
+              byHref = label;
+            }
+            const itemBase = stripFragment(itemHref);
+            if (byBase == null && base != null && itemBase === base) {
+              byBase = label;
+            }
+          }
+          if (item.subitems && item.subitems.length > 0) stack.push(item.subitems);
+        }
+      }
+      return { byIndex, byHref, byBase };
+    };
+    const found = visit(toc);
+    return found.byIndex ?? found.byHref ?? found.byBase;
+  }
+  function buildChapterSeparatorCss() {
+    return [
+      `body[${CHAPTER_DIVIDER_ATTR}="true"] {`,
+      "  border-top: 2px solid #d1d5db;",
+      "  margin-top: 28px;",
+      "  padding-top: 14px;",
+      "}",
+      `body[${CHAPTER_DIVIDER_ATTR}="true"][${CHAPTER_TITLE_ATTR}]:not([${CHAPTER_TITLE_ATTR}=""])::before {`,
+      `  content: attr(${CHAPTER_TITLE_ATTR});`,
+      "  display: block;",
+      "  font-size: 1.05em;",
+      "  font-weight: 700;",
+      "  line-height: 1.4;",
+      "  color: #4b5563;",
+      "  letter-spacing: 0.01em;",
+      "  margin-bottom: 12px;",
+      "  overflow-wrap: anywhere;",
+      "}",
+      "@media (prefers-color-scheme: dark) {",
+      `  body[${CHAPTER_DIVIDER_ATTR}="true"] { border-top-color: #4b5563; }`,
+      `  body[${CHAPTER_DIVIDER_ATTR}="true"][${CHAPTER_TITLE_ATTR}]:not([${CHAPTER_TITLE_ATTR}=""])::before { color: #d1d5db; }`,
+      "}"
+    ].join("\n");
+  }
+  function ensureSeparatorStyle(doc, cssText) {
+    if (!doc || typeof doc.getElementById !== "function") return;
+    const existing = doc.getElementById(CHAPTER_SEPARATOR_STYLE_ID);
+    if (existing) return;
+    if (!doc.head || typeof doc.createElement !== "function") return;
+    const style = doc.createElement("style");
+    style.id = CHAPTER_SEPARATOR_STYLE_ID;
+    style.textContent = cssText;
+    doc.head.appendChild(style);
+  }
+  function applyChapterSeparatorToDoc(doc, ctx, cssText = buildChapterSeparatorCss()) {
+    if (!doc || !doc.body) return "skipped";
+    if (!shouldShowDivider(ctx)) {
+      const removed = removeChapterSeparatorFromDoc(doc);
+      return removed ? "removed" : "skipped";
+    }
+    ensureSeparatorStyle(doc, cssText);
+    const title = resolveChapterTitle(ctx.sectionIndex, ctx.sectionHref ?? null, ctx.toc ?? null);
+    const body = doc.body;
+    const wantDivider = "true";
+    const hasDivider = body.getAttribute(CHAPTER_DIVIDER_ATTR);
+    const hasTitle = body.getAttribute(CHAPTER_TITLE_ATTR);
+    if (hasDivider === wantDivider && (hasTitle ?? "") === (title ?? "")) {
+      return "skipped";
+    }
+    body.setAttribute(CHAPTER_DIVIDER_ATTR, wantDivider);
+    if (title) {
+      body.setAttribute(CHAPTER_TITLE_ATTR, title);
+    } else {
+      body.removeAttribute(CHAPTER_TITLE_ATTR);
+    }
+    return "applied";
+  }
+  function removeChapterSeparatorFromDoc(doc) {
+    if (!doc || !doc.body) return false;
+    let removed = false;
+    try {
+      if (doc.body.getAttribute(CHAPTER_DIVIDER_ATTR) != null) {
+        doc.body.removeAttribute(CHAPTER_DIVIDER_ATTR);
+        removed = true;
+      }
+      if (doc.body.getAttribute(CHAPTER_TITLE_ATTR) != null) {
+        doc.body.removeAttribute(CHAPTER_TITLE_ATTR);
+        removed = true;
+      }
+    } catch {
+      return removed;
+    }
+    return removed;
+  }
+  function installReadAnyChapterSeparator(host) {
+    const scope = host;
+    if (!scope || typeof scope !== "object") return;
+    const api = {
+      applyToDoc: (doc, ctx) => applyChapterSeparatorToDoc(doc, ctx),
+      removeFromDoc: (doc) => removeChapterSeparatorFromDoc(doc),
+      constants: {
+        styleId: CHAPTER_SEPARATOR_STYLE_ID,
+        dividerAttr: CHAPTER_DIVIDER_ATTR,
+        titleAttr: CHAPTER_TITLE_ATTR
+      }
+    };
+    scope.ReadAnyChapterSeparator = api;
+  }
+
+  // ../core/src/reader/chapter-separator-entry.ts
+  installReadAnyChapterSeparator(globalThis);
+})();
+
+</script>
+
+  <script>
+(() => {
+  // ../core/src/translation/translation-text.ts
+  var CJK_SCRIPT_RE = /[㐀-䶿一-鿿豈-﫿぀-ヿ가-힯]/;
+  function normalizeParagraphText(text) {
+    if (!text) return "";
+    return text.replace(/\s+/g, " ").trim();
+  }
+  function shouldBypassWholeWordForQuery(query) {
+    if (!query) return false;
+    return CJK_SCRIPT_RE.test(query);
+  }
+  function effectiveWholeWord(wholeWord, query) {
+    return wholeWord && !shouldBypassWholeWordForQuery(query);
+  }
+  function installReadAnyTranslationText(host) {
+    const scope = host;
+    if (!scope || typeof scope !== "object") return;
+    const api = {
+      normalizeParagraphText,
+      shouldBypassWholeWordForQuery,
+      effectiveWholeWord
+    };
+    scope.ReadAnyTranslationText = api;
+  }
+
+  // ../core/src/translation/translation-text-entry.ts
+  installReadAnyTranslationText(globalThis);
+})();
+
+</script>
+
+  <script>
     // ═══════════════════════════════════════════════════════════════
     // ReadAny WebView Reader Bridge
     // Communicates with React Native via postMessage
@@ -398,6 +584,18 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
     let imageGalleryJobId = 0;
     let imageGalleryItems = []; // { sectionIndex, imgIndex, src, alt, cfi }
     let imageGalleryReady = false;
+    // Guard against a never-resolving createDocument() (corrupt/huge section):
+    // time out instead of stalling the whole gallery scan forever.
+    const IMAGE_DOC_TIMEOUT_MS = 10000;
+    function docWithTimeout(promise, ms) {
+      let timer = null;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('doc-timeout')), ms);
+      });
+      return Promise.race([promise, timeout]).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+    }
     // ── Fast whole-book text search: in-memory cache, Moon Reader style ──
     // Cache holds plain text per section so queries scan strings instead of
     // re-parsing every chapter. Navigation resolves CFI lazily for one match.
@@ -903,6 +1101,40 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
       return getRendererContents().filter((content) => content.overlayer);
     }
 
+    // ─── Chapter separator (continuous scroll, presentation-only) ───
+    // Applies the shared core separator engine to one loaded section document:
+    // attributes + one guarded <style> node, zero content nodes — so CFI,
+    // search/translation extraction, and image indices are unaffected.
+    // Idempotent: re-applying to the same document is a no-op.
+    function applyChapterSeparatorForDoc(doc, sectionIndex) {
+      try {
+        var api = window.ReadAnyChapterSeparator;
+        if (!api || !doc) return;
+        var sections = (currentBook && currentBook.sections) || [];
+        var section = sections[sectionIndex];
+        api.applyToDoc(doc, {
+          sectionIndex: sectionIndex,
+          sectionHref: section && section.href ? section.href : null,
+          toc: currentBook ? currentBook.toc : null,
+          isFixedLayout: Boolean(view && view.isFixedLayout),
+          disabled: Boolean(currentBookIsPdf),
+        });
+      } catch (e) {}
+    }
+
+    function invalidateChapterSeparators() {
+      try {
+        var api = window.ReadAnyChapterSeparator;
+        if (!api) return;
+        var contents = getRendererContents();
+        for (var i = 0; i < contents.length; i++) {
+          try {
+            if (contents[i] && contents[i].doc) api.removeFromDoc(contents[i].doc);
+          } catch (e) {}
+        }
+      } catch (e) {}
+    }
+
     function removeAllTTSHighlights() {
       const contexts = getAllTTSOverlayerContexts();
       for (const context of contexts) {
@@ -1057,7 +1289,7 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
         const section = book.sections[index];
         if (!section || !section.createDocument) continue;
         try {
-          const doc = await section.createDocument();
+          const doc = await docWithTimeout(section.createDocument(), IMAGE_DOC_TIMEOUT_MS);
           const sectionCharacters = countReadableCharacters(doc);
           if (sectionCharacters > 0) {
             totalCharacters += sectionCharacters;
@@ -1575,6 +1807,7 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
           searchResults = [];
           searchIndex = 0;
           fastSearchToken += 1;
+          pendingSearchQuery = null;
           break;
         case 'goToSearchMatch':
           if (msg.sectionIndex != null) goToCachedMatch(msg.sectionIndex, msg.blockIndex, msg.blockOffset);
@@ -1714,6 +1947,7 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
       bookTextCache = null;
       bookTextCacheReady = false;
       fastSearchToken += 1;
+      pendingSearchQuery = null;
       stopAutoScrollLoop();
       autoScrollActive = false;
       lastAutoScrollFraction = null;
@@ -1722,6 +1956,7 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
       speedReadWords = [];
       speedReadPos = 0;
       invalidateImageGallery();
+      invalidateChapterSeparators();
 
       try {
         let hasSignalledLoaded = false;
@@ -1871,6 +2106,11 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
           const { doc, index, primary } = e.detail;
           markLoaded();
           normalizeBrOnlyParagraphs(doc);
+          // Chapter boundary marker for continuous scroll (event-driven, once
+          // per loaded document; internally idempotent, no timers).
+          if (typeof index === 'number') {
+            try { applyChapterSeparatorForDoc(doc, index); } catch (err) {}
+          }
           if (primary !== false) {
             currentSectionUsesVerticalWriting = !el.isFixedLayout && isVerticalDoc(doc);
             applyRendererFlowMode(el.renderer);
@@ -2189,6 +2429,14 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
       bookTextCache = { bookRef: book, sections };
       bookTextCacheReady = true;
       postToRN('searchCacheProgress', { progress: 1 });
+      // Retry a query that arrived while this build was running.
+      try {
+        if (pendingSearchQuery) {
+          const parked = pendingSearchQuery;
+          pendingSearchQuery = null;
+          handleSearchFast(parked.query, parked.opts);
+        }
+      } catch (e) { /* retry is best-effort */ }
       return true;
     }
 
@@ -2258,14 +2506,37 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
       return { blockIndex, blockOffset: offset - bounds[blockIndex] };
     }
 
+    // Query that arrived while the text index was still building; it is
+    // retried automatically once the build finishes (instead of dying silent
+    // and leaving the RN spinner stuck).
+    let pendingSearchQuery = null;
+    // CJK scripts have no word boundaries: whole-word matching on Han/Hangul/
+    // Kana queries matches ~nothing, so it is bypassed for such queries
+    // (shared core rule; local regex kept only as a fallback).
     async function handleSearchFast(query, opts) {
       const myToken = ++fastSearchToken;
-      if (!view || !query) return;
+      if (!view || !query) {
+        postToRN('searchComplete', { count: 0 });
+        return;
+      }
       const { matchCase, wholeWord, direction } = matchOptionsOf(opts);
       const needle = matchCase ? query : query.toLocaleLowerCase();
-      if (!needle) return;
+      if (!needle) {
+        postToRN('searchComplete', { count: 0 });
+        return;
+      }
       const cacheOk = await ensureBookTextCache();
-      if (!cacheOk || myToken !== fastSearchToken) return;
+      if (myToken !== fastSearchToken) return; // superseded by a newer query
+      if (!cacheOk) {
+        // Index still building (or book not ready): park this query for retry
+        // when the build completes; report completion so no spinner sticks.
+        pendingSearchQuery = { query, opts };
+        postToRN('searchComplete', { count: 0 });
+        return;
+      }
+      const wholeWordEff = window.ReadAnyTranslationText
+        ? window.ReadAnyTranslationText.effectiveWholeWord(wholeWord, query)
+        : (wholeWord && !/[㐀-䶿一-鿿豈-﫿぀-ヿ가-힯]/.test(query));
       const myCache = bookTextCache;
       // Direction filter is section-level (current section always included)
       const anchorSection = currentSectionIndex | 0;
@@ -2284,7 +2555,7 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
           const at = haystack.indexOf(needle, from);
           if (at < 0) break;
           from = at + Math.max(1, needle.length);
-          if (wholeWord && !isWholeWordMatch(raw, at, needle.length)) continue;
+          if (wholeWordEff && !isWholeWordMatch(raw, at, needle.length)) continue;
           totalCount++;
           if (results.length < FAST_SEARCH_MAX_RESULTS) {
             const loc = locateBlock(section.bounds, at);
@@ -2661,7 +2932,7 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
           const section = book.sections[i];
           if (!section || !section.createDocument) continue;
           try {
-            const doc = await section.createDocument();
+            const doc = await docWithTimeout(section.createDocument(), IMAGE_DOC_TIMEOUT_MS);
             const imgs = doc.querySelectorAll('img');
             for (let j = 0; j < imgs.length; j++) {
               const img = imgs[j];
@@ -2693,13 +2964,15 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
                 cfi,
               });
             }
-          } catch (err) { /* skip unreadable section */ }
+          } catch (err) { /* skip unreadable/timed-out section */ }
           if (i % 3 === 2) {
             postToRN('imageGalleryProgress', { progress: (i + 1) / total });
             await new Promise((resolve) => setTimeout(resolve, 0));
           }
         }
       } catch (e) {
+        // Terminal failure: tell RN so the spinner can clear and retry later.
+        try { postToRN('imageGalleryError', { message: String((e && e.message) || e) }); } catch (_) {}
         return false;
       }
       if (myJob !== imageGalleryJobId || currentBook !== book) return false;
@@ -2717,7 +2990,41 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
 
     // Kirim data gambar (thumbnail/full) sebagai dataURL ke RN.
     // Blob URL WebView tidak bisa dibaca RN Image, jadi render via canvas.
-    async function requestImageData(sectionIndex, docImgIndex, maxDim) {
+    // Concurrency bound: canvas drawImage/toDataURL are synchronous main-thread
+    // work — serialize to at most 2 concurrent encodes so 100+ image books
+    // cannot spike CPU/memory with parallel full-res encodes. Queued requests
+    // always resolve (same error posts as the direct path).
+    const IMAGE_DATA_MAX_CONCURRENT = 2;
+    let imageDataRunning = 0;
+    const imageDataWaiters = [];
+    function requestImageData(sectionIndex, docImgIndex, maxDim) {
+      return new Promise(function (resolve) {
+        // Generation tag: invalidateImageGallery() bumps imageGalleryJobId on
+        // book change, so queued requests for the old book are dropped instead
+        // of decoding the wrong book's images.
+        imageDataWaiters.push({ sectionIndex, docImgIndex, maxDim, resolve, job: imageGalleryJobId });
+        pumpImageDataQueue();
+      });
+    }
+    function pumpImageDataQueue() {
+      if (imageDataRunning >= IMAGE_DATA_MAX_CONCURRENT) return;
+      var next = imageDataWaiters.shift();
+      if (!next) return;
+      if (next.job !== imageGalleryJobId) {
+        try { next.resolve(); } catch (e) {}
+        pumpImageDataQueue();
+        return;
+      }
+      imageDataRunning += 1;
+      requestImageDataInner(next.sectionIndex, next.docImgIndex, next.maxDim)
+        .catch(function () {})
+        .finally(function () {
+          imageDataRunning -= 1;
+          next.resolve();
+          pumpImageDataQueue();
+        });
+    }
+    async function requestImageDataInner(sectionIndex, docImgIndex, maxDim) {
       const si = Number(sectionIndex);
       const di = Number(docImgIndex);
       const maxSide = Math.max(48, Math.min(2000, Number(maxDim) || 240));
@@ -2727,7 +3034,7 @@ ${rules.map((rule) => `  ${rule}`).join("\n")}
           postToRN('imageData', { sectionIndex: si, imgIndex: di, error: 'no-section' });
           return;
         }
-        const doc = await book.sections[si].createDocument();
+        const doc = await docWithTimeout(book.sections[si].createDocument(), IMAGE_DOC_TIMEOUT_MS);
         const imgs = doc.querySelectorAll('img');
         const img = imgs[di];
         if (!img) {
@@ -5199,7 +5506,7 @@ html, body {
     window.goToProgress = function (p) { if (view) view.goToFraction(p); };
     window.search = function (q, opts) { handleSearchFast(q, opts); };
     window.navigateSearch = function (idx) { navigateToSearchResult(idx); };
-    window.clearSearch = function () { if (view) view.clearSearch(); searchResults = []; fastSearchToken += 1; };
+    window.clearSearch = function () { if (view) view.clearSearch(); searchResults = []; fastSearchToken += 1; pendingSearchQuery = null; };
     window.goToSearchMatch = function (sectionIndex, blockIndex, blockOffset) { goToCachedMatch(sectionIndex, blockIndex, blockOffset); };
     window.ensureBookTextCache = function () { ensureBookTextCache(); };
     window.setAutoScroll = function (active, speedPxPerSec) { setAutoScroll(active, speedPxPerSec); };
@@ -5343,6 +5650,9 @@ html, body {
     };
     window.doRemoveChapterTranslations = function (sectionIndex) {
       handleRemoveChapterTranslations(sectionIndex);
+    };
+    window.doApplyChapterTranslationVisibility = function (originalVisible, translationVisible, sectionIndex) {
+      handleApplyChapterTranslationVisibility(originalVisible, translationVisible, sectionIndex);
     };
 
     // ─── Polyfills ───
@@ -5660,7 +5970,13 @@ html, body {
           var paragraphs = [];
           for (var i = 0; i < blocks.length; i++) {
             var el = blocks[i];
-            var text = (el.innerText || el.textContent || '').trim();
+            // Shared normalization (core translation-text bundle): byte-identical
+            // to the background queue extractor so cache keys and source hashes
+            // match across both paths. Fallback preserves the old behavior.
+            var rawText = (el.innerText || el.textContent || '');
+            var text = window.ReadAnyTranslationText
+              ? window.ReadAnyTranslationText.normalizeParagraphText(rawText)
+              : rawText.trim();
             if (text.length < 2) continue;
             var id = 'para_' + i;
             el.setAttribute('data-translate-id', id);
@@ -5857,6 +6173,48 @@ html, body {
         }
       } catch (err) {
         console.error('[WebView] Error removing translations:', err);
+      }
+    }
+
+    function handleApplyChapterTranslationVisibility(originalVisible, translationVisible, sectionIndex) {
+      try {
+        var indexed = getRendererContentForSection(sectionIndex);
+        var docs = [];
+        var contents = getRendererContents();
+        for (var ci = 0; ci < contents.length; ci++) {
+          if (contents[ci] && contents[ci].doc) docs.push(contents[ci].doc);
+        }
+        var targets = [];
+        if (indexed && indexed.doc) targets.push(indexed.doc);
+        else if (docs.length) targets = docs.slice();
+        else {
+          var iframes = document.querySelectorAll('iframe');
+          for (var fi = 0; fi < iframes.length; fi++) {
+            try {
+              var iframeDoc = iframes[fi].contentDocument || (iframes[fi].contentWindow && iframes[fi].contentWindow.document);
+              if (iframeDoc && iframeDoc.body) { targets.push(iframeDoc); break; }
+            } catch (e) {}
+          }
+        }
+        var hiddenOriginal = String(!originalVisible);
+        var hiddenTranslation = String(!translationVisible);
+        var solo = String(!originalVisible && translationVisible);
+        for (var di = 0; di < targets.length; di++) {
+          try {
+            var doc = targets[di];
+            var origEls = doc.querySelectorAll('[data-translate-id]');
+            for (var j = 0; j < origEls.length; j++) {
+              origEls[j].setAttribute('data-original-hidden', hiddenOriginal);
+            }
+            var els = doc.querySelectorAll('.readany-translation');
+            for (var i = 0; i < els.length; i++) {
+              els[i].setAttribute('data-hidden', hiddenTranslation);
+              els[i].setAttribute('data-solo', solo);
+            }
+          } catch (e) {}
+        }
+      } catch (err) {
+        console.error('[WebView] Error applying translation visibility:', err);
       }
     }
 

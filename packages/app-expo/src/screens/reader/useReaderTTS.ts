@@ -15,6 +15,7 @@ import { getPlatformService } from "@readany/core/services";
 import { type TTSConfig, normalizeTTSConfig, splitNarrationText } from "@readany/core/tts";
 import { eventBus } from "@readany/core/utils/event-bus";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { AppState, type AppStateStatus } from "react-native";
 import {
   collectMissingTTSDebugSentences,
@@ -167,6 +168,7 @@ export function useReaderTTS({
   colors,
   goToHref,
 }: UseReaderTTSOptions): UseReaderTTSResult {
+  const { t } = useTranslation();
   // ─── TTS Store ─────────────────────────────────────────────────────────────
   const ttsPlay = useTTSStore((s) => s.play);
   const ttsAppend = useTTSStore((s) => s.append);
@@ -413,7 +415,10 @@ export function useReaderTTS({
     return ttsCurrentLocationCfi || null;
   }, [bookId, currentTTSSegment?.cfi, ttsCurrentBookId, ttsCurrentLocationCfi]);
 
-  const ttsSourceLabel = ttsSourceKind === "selection" ? "来自选中文本" : "从当前页开始";
+  const ttsSourceLabel =
+    ttsSourceKind === "selection"
+      ? t("tts.sourceFromSelection", "From selected text")
+      : t("tts.sourceFromPage", "From current page");
 
   // ─── Utility callbacks ──────────────────────────────────────────────────────
   const syncTTSChunkOffset = useCallback((nextOffset: number) => {

@@ -3,6 +3,7 @@ import { MissingBookPrompt } from "@/components/shared/MissingBookPrompt";
 import BadgesScreen from "@/screens/BadgesScreen";
 import { BookChatScreen } from "@/screens/BookChatScreen";
 import { BookDetailsScreen } from "@/screens/BookDetailsScreen";
+import { BookOverviewScreen } from "@/screens/BookOverviewScreen";
 import { FullScreenNotesScreen } from "@/screens/FullScreenNotesScreen";
 import { ReaderScreen } from "@/screens/ReaderScreen";
 import SkillsScreen from "@/screens/SkillsScreen";
@@ -30,7 +31,15 @@ import { TabNavigator } from "./TabNavigator";
 export type RootStackParamList = {
   Onboarding: undefined;
   Tabs: undefined;
-  Reader: { bookId: string; cfi?: string; highlight?: boolean; openTTS?: boolean };
+  Reader: {
+    bookId: string;
+    cfi?: string;
+    href?: string;
+    highlight?: boolean;
+    openTTS?: boolean;
+    openSearch?: boolean;
+  };
+  BookOverview: { bookId: string };
   BookDetails: { bookId: string };
   BookChat: { bookId: string; selectedText?: string; chapterTitle?: string };
   Stats: undefined;
@@ -71,6 +80,11 @@ export function RootNavigator() {
             <Stack.Screen
               name="Reader"
               component={ReaderScreen}
+              options={{ animation: "slide_from_right" }}
+            />
+            <Stack.Screen
+              name="BookOverview"
+              component={BookOverviewScreen}
               options={{ animation: "slide_from_right" }}
             />
             <Stack.Screen

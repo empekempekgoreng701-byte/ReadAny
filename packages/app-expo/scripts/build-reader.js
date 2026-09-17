@@ -78,11 +78,67 @@ async function buildReader() {
     });
     const justifiedText = justifyResult.outputFiles[0].text;
 
+    // Bundle the shared chapter-separator engine from core — presentation-only
+    // (attributes + CSS, zero content nodes so CFI/search/translation stay
+    // valid) — and install it on the reader's globalThis (unminified so the
+    // logic stays auditable).
+    const separatorResult = await esbuild.build({
+      stdin: {
+        contents: `
+          import { installReadAnyChapterSeparator } from "${CORE_READER.replace(/\\/g, "/")}/chapter-separator";
+          installReadAnyChapterSeparator(globalThis);
+        `,
+        resolveDir: path.resolve(__dirname, "../../core/src/reader"),
+        sourcefile: "chapter-separator-entry.ts",
+      },
+      bundle: true,
+      format: "iife",
+      target: "es2020",
+      write: false,
+    });
+    const chapterSeparator = separatorResult.outputFiles[0].text;
+
+    // Bundle the shared translation-text primitives from core (paragraph
+    // normalization + CJK whole-word rule). Both the WebView extractor and
+    // the background queue MUST produce byte-identical paragraph text, or
+    // cache keys / source hashes diverge and queue translations would never
+    // restore in the reader.
+    const translationTextResult = await esbuild.build({
+      stdin: {
+        contents: `
+          import { installReadAnyTranslationText } from "${CORE_READER.replace(/\\/g, "/")}/../translation/translation-text";
+          installReadAnyTranslationText(globalThis);
+        `,
+        resolveDir: path.resolve(__dirname, "../../core/src/translation"),
+        sourcefile: "translation-text-entry.ts",
+      },
+      bundle: true,
+      format: "iife",
+      target: "es2020",
+      write: false,
+    });
+    const translationText = translationTextResult.outputFiles[0].text;
+
     // Read the template HTML and reader-side helper sources (never modified)
     const template = fs.readFileSync(TEMPLATE, "utf-8");
 
+    const SEPARATOR_MARKER = "<!-- __READANY_CHAPTER_SEPARATOR_INSERT_POINT_9d41c7e3__ -->";
+    const separatorParts = template.split(SEPARATOR_MARKER);
+    if (separatorParts.length !== 2) {
+      throw new Error("Reader template must contain exactly one chapter-separator marker");
+    }
+    const templateWithSeparator = `${separatorParts[0]}<script>\n${chapterSeparator}\n</script>${separatorParts[1]}`;
+
+    const TRANSLATION_TEXT_MARKER =
+      "<!-- __READANY_TRANSLATION_TEXT_INSERT_POINT_4b7e2a91__ -->";
+    const translationTextParts = templateWithSeparator.split(TRANSLATION_TEXT_MARKER);
+    if (translationTextParts.length !== 2) {
+      throw new Error("Reader template must contain exactly one translation-text marker");
+    }
+    const templateWithTranslationText = `${translationTextParts[0]}<script>\n${translationText}\n</script>${translationTextParts[1]}`;
+
     const JUSTIFIED_TEXT_MARKER = "<!-- __READANY_JUSTIFIED_TEXT_INSERT_POINT_6c18f4d2__ -->";
-    const justifiedTextParts = template.split(JUSTIFIED_TEXT_MARKER);
+    const justifiedTextParts = templateWithTranslationText.split(JUSTIFIED_TEXT_MARKER);
     if (justifiedTextParts.length !== 2) {
       throw new Error("Reader template must contain exactly one justified-text marker");
     }

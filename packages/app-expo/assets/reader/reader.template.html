@@ -191,6 +191,10 @@
 
   <!-- __READANY_JUSTIFIED_TEXT_INSERT_POINT_6c18f4d2__ -->
 
+  <!-- __READANY_CHAPTER_SEPARATOR_INSERT_POINT_9d41c7e3__ -->
+
+  <!-- __READANY_TRANSLATION_TEXT_INSERT_POINT_4b7e2a91__ -->
+
   <script>
     // ═══════════════════════════════════════════════════════════════
     // ReadAny WebView Reader Bridge
@@ -223,6 +227,18 @@
     let imageGalleryJobId = 0;
     let imageGalleryItems = []; // { sectionIndex, imgIndex, src, alt, cfi }
     let imageGalleryReady = false;
+    // Guard against a never-resolving createDocument() (corrupt/huge section):
+    // time out instead of stalling the whole gallery scan forever.
+    const IMAGE_DOC_TIMEOUT_MS = 10000;
+    function docWithTimeout(promise, ms) {
+      let timer = null;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('doc-timeout')), ms);
+      });
+      return Promise.race([promise, timeout]).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+    }
     // ── Fast whole-book text search: in-memory cache, Moon Reader style ──
     // Cache holds plain text per section so queries scan strings instead of
     // re-parsing every chapter. Navigation resolves CFI lazily for one match.
@@ -728,6 +744,40 @@
       return getRendererContents().filter((content) => content.overlayer);
     }
 
+    // ─── Chapter separator (continuous scroll, presentation-only) ───
+    // Applies the shared core separator engine to one loaded section document:
+    // attributes + one guarded <style> node, zero content nodes — so CFI,
+    // search/translation extraction, and image indices are unaffected.
+    // Idempotent: re-applying to the same document is a no-op.
+    function applyChapterSeparatorForDoc(doc, sectionIndex) {
+      try {
+        var api = window.ReadAnyChapterSeparator;
+        if (!api || !doc) return;
+        var sections = (currentBook && currentBook.sections) || [];
+        var section = sections[sectionIndex];
+        api.applyToDoc(doc, {
+          sectionIndex: sectionIndex,
+          sectionHref: section && section.href ? section.href : null,
+          toc: currentBook ? currentBook.toc : null,
+          isFixedLayout: Boolean(view && view.isFixedLayout),
+          disabled: Boolean(currentBookIsPdf),
+        });
+      } catch (e) {}
+    }
+
+    function invalidateChapterSeparators() {
+      try {
+        var api = window.ReadAnyChapterSeparator;
+        if (!api) return;
+        var contents = getRendererContents();
+        for (var i = 0; i < contents.length; i++) {
+          try {
+            if (contents[i] && contents[i].doc) api.removeFromDoc(contents[i].doc);
+          } catch (e) {}
+        }
+      } catch (e) {}
+    }
+
     function removeAllTTSHighlights() {
       const contexts = getAllTTSOverlayerContexts();
       for (const context of contexts) {
@@ -882,7 +932,7 @@
         const section = book.sections[index];
         if (!section || !section.createDocument) continue;
         try {
-          const doc = await section.createDocument();
+          const doc = await docWithTimeout(section.createDocument(), IMAGE_DOC_TIMEOUT_MS);
           const sectionCharacters = countReadableCharacters(doc);
           if (sectionCharacters > 0) {
             totalCharacters += sectionCharacters;
@@ -1400,6 +1450,7 @@
           searchResults = [];
           searchIndex = 0;
           fastSearchToken += 1;
+          pendingSearchQuery = null;
           break;
         case 'goToSearchMatch':
           if (msg.sectionIndex != null) goToCachedMatch(msg.sectionIndex, msg.blockIndex, msg.blockOffset);
@@ -1539,6 +1590,7 @@
       bookTextCache = null;
       bookTextCacheReady = false;
       fastSearchToken += 1;
+      pendingSearchQuery = null;
       stopAutoScrollLoop();
       autoScrollActive = false;
       lastAutoScrollFraction = null;
@@ -1547,6 +1599,7 @@
       speedReadWords = [];
       speedReadPos = 0;
       invalidateImageGallery();
+      invalidateChapterSeparators();
 
       try {
         let hasSignalledLoaded = false;
@@ -1696,6 +1749,11 @@
           const { doc, index, primary } = e.detail;
           markLoaded();
           normalizeBrOnlyParagraphs(doc);
+          // Chapter boundary marker for continuous scroll (event-driven, once
+          // per loaded document; internally idempotent, no timers).
+          if (typeof index === 'number') {
+            try { applyChapterSeparatorForDoc(doc, index); } catch (err) {}
+          }
           if (primary !== false) {
             currentSectionUsesVerticalWriting = !el.isFixedLayout && isVerticalDoc(doc);
             applyRendererFlowMode(el.renderer);
@@ -2014,6 +2072,14 @@
       bookTextCache = { bookRef: book, sections };
       bookTextCacheReady = true;
       postToRN('searchCacheProgress', { progress: 1 });
+      // Retry a query that arrived while this build was running.
+      try {
+        if (pendingSearchQuery) {
+          const parked = pendingSearchQuery;
+          pendingSearchQuery = null;
+          handleSearchFast(parked.query, parked.opts);
+        }
+      } catch (e) { /* retry is best-effort */ }
       return true;
     }
 
@@ -2083,14 +2149,37 @@
       return { blockIndex, blockOffset: offset - bounds[blockIndex] };
     }
 
+    // Query that arrived while the text index was still building; it is
+    // retried automatically once the build finishes (instead of dying silent
+    // and leaving the RN spinner stuck).
+    let pendingSearchQuery = null;
+    // CJK scripts have no word boundaries: whole-word matching on Han/Hangul/
+    // Kana queries matches ~nothing, so it is bypassed for such queries
+    // (shared core rule; local regex kept only as a fallback).
     async function handleSearchFast(query, opts) {
       const myToken = ++fastSearchToken;
-      if (!view || !query) return;
+      if (!view || !query) {
+        postToRN('searchComplete', { count: 0 });
+        return;
+      }
       const { matchCase, wholeWord, direction } = matchOptionsOf(opts);
       const needle = matchCase ? query : query.toLocaleLowerCase();
-      if (!needle) return;
+      if (!needle) {
+        postToRN('searchComplete', { count: 0 });
+        return;
+      }
       const cacheOk = await ensureBookTextCache();
-      if (!cacheOk || myToken !== fastSearchToken) return;
+      if (myToken !== fastSearchToken) return; // superseded by a newer query
+      if (!cacheOk) {
+        // Index still building (or book not ready): park this query for retry
+        // when the build completes; report completion so no spinner sticks.
+        pendingSearchQuery = { query, opts };
+        postToRN('searchComplete', { count: 0 });
+        return;
+      }
+      const wholeWordEff = window.ReadAnyTranslationText
+        ? window.ReadAnyTranslationText.effectiveWholeWord(wholeWord, query)
+        : (wholeWord && !/[㐀-䶿一-鿿豈-﫿぀-ヿ가-힯]/.test(query));
       const myCache = bookTextCache;
       // Direction filter is section-level (current section always included)
       const anchorSection = currentSectionIndex | 0;
@@ -2109,7 +2198,7 @@
           const at = haystack.indexOf(needle, from);
           if (at < 0) break;
           from = at + Math.max(1, needle.length);
-          if (wholeWord && !isWholeWordMatch(raw, at, needle.length)) continue;
+          if (wholeWordEff && !isWholeWordMatch(raw, at, needle.length)) continue;
           totalCount++;
           if (results.length < FAST_SEARCH_MAX_RESULTS) {
             const loc = locateBlock(section.bounds, at);
@@ -2486,7 +2575,7 @@
           const section = book.sections[i];
           if (!section || !section.createDocument) continue;
           try {
-            const doc = await section.createDocument();
+            const doc = await docWithTimeout(section.createDocument(), IMAGE_DOC_TIMEOUT_MS);
             const imgs = doc.querySelectorAll('img');
             for (let j = 0; j < imgs.length; j++) {
               const img = imgs[j];
@@ -2518,13 +2607,15 @@
                 cfi,
               });
             }
-          } catch (err) { /* skip unreadable section */ }
+          } catch (err) { /* skip unreadable/timed-out section */ }
           if (i % 3 === 2) {
             postToRN('imageGalleryProgress', { progress: (i + 1) / total });
             await new Promise((resolve) => setTimeout(resolve, 0));
           }
         }
       } catch (e) {
+        // Terminal failure: tell RN so the spinner can clear and retry later.
+        try { postToRN('imageGalleryError', { message: String((e && e.message) || e) }); } catch (_) {}
         return false;
       }
       if (myJob !== imageGalleryJobId || currentBook !== book) return false;
@@ -2542,7 +2633,41 @@
 
     // Kirim data gambar (thumbnail/full) sebagai dataURL ke RN.
     // Blob URL WebView tidak bisa dibaca RN Image, jadi render via canvas.
-    async function requestImageData(sectionIndex, docImgIndex, maxDim) {
+    // Concurrency bound: canvas drawImage/toDataURL are synchronous main-thread
+    // work — serialize to at most 2 concurrent encodes so 100+ image books
+    // cannot spike CPU/memory with parallel full-res encodes. Queued requests
+    // always resolve (same error posts as the direct path).
+    const IMAGE_DATA_MAX_CONCURRENT = 2;
+    let imageDataRunning = 0;
+    const imageDataWaiters = [];
+    function requestImageData(sectionIndex, docImgIndex, maxDim) {
+      return new Promise(function (resolve) {
+        // Generation tag: invalidateImageGallery() bumps imageGalleryJobId on
+        // book change, so queued requests for the old book are dropped instead
+        // of decoding the wrong book's images.
+        imageDataWaiters.push({ sectionIndex, docImgIndex, maxDim, resolve, job: imageGalleryJobId });
+        pumpImageDataQueue();
+      });
+    }
+    function pumpImageDataQueue() {
+      if (imageDataRunning >= IMAGE_DATA_MAX_CONCURRENT) return;
+      var next = imageDataWaiters.shift();
+      if (!next) return;
+      if (next.job !== imageGalleryJobId) {
+        try { next.resolve(); } catch (e) {}
+        pumpImageDataQueue();
+        return;
+      }
+      imageDataRunning += 1;
+      requestImageDataInner(next.sectionIndex, next.docImgIndex, next.maxDim)
+        .catch(function () {})
+        .finally(function () {
+          imageDataRunning -= 1;
+          next.resolve();
+          pumpImageDataQueue();
+        });
+    }
+    async function requestImageDataInner(sectionIndex, docImgIndex, maxDim) {
       const si = Number(sectionIndex);
       const di = Number(docImgIndex);
       const maxSide = Math.max(48, Math.min(2000, Number(maxDim) || 240));
@@ -2552,7 +2677,7 @@
           postToRN('imageData', { sectionIndex: si, imgIndex: di, error: 'no-section' });
           return;
         }
-        const doc = await book.sections[si].createDocument();
+        const doc = await docWithTimeout(book.sections[si].createDocument(), IMAGE_DOC_TIMEOUT_MS);
         const imgs = doc.querySelectorAll('img');
         const img = imgs[di];
         if (!img) {
@@ -5024,7 +5149,7 @@ html, body {
     window.goToProgress = function (p) { if (view) view.goToFraction(p); };
     window.search = function (q, opts) { handleSearchFast(q, opts); };
     window.navigateSearch = function (idx) { navigateToSearchResult(idx); };
-    window.clearSearch = function () { if (view) view.clearSearch(); searchResults = []; fastSearchToken += 1; };
+    window.clearSearch = function () { if (view) view.clearSearch(); searchResults = []; fastSearchToken += 1; pendingSearchQuery = null; };
     window.goToSearchMatch = function (sectionIndex, blockIndex, blockOffset) { goToCachedMatch(sectionIndex, blockIndex, blockOffset); };
     window.ensureBookTextCache = function () { ensureBookTextCache(); };
     window.setAutoScroll = function (active, speedPxPerSec) { setAutoScroll(active, speedPxPerSec); };
@@ -5168,6 +5293,9 @@ html, body {
     };
     window.doRemoveChapterTranslations = function (sectionIndex) {
       handleRemoveChapterTranslations(sectionIndex);
+    };
+    window.doApplyChapterTranslationVisibility = function (originalVisible, translationVisible, sectionIndex) {
+      handleApplyChapterTranslationVisibility(originalVisible, translationVisible, sectionIndex);
     };
 
     // ─── Polyfills ───
@@ -5485,7 +5613,13 @@ html, body {
           var paragraphs = [];
           for (var i = 0; i < blocks.length; i++) {
             var el = blocks[i];
-            var text = (el.innerText || el.textContent || '').trim();
+            // Shared normalization (core translation-text bundle): byte-identical
+            // to the background queue extractor so cache keys and source hashes
+            // match across both paths. Fallback preserves the old behavior.
+            var rawText = (el.innerText || el.textContent || '');
+            var text = window.ReadAnyTranslationText
+              ? window.ReadAnyTranslationText.normalizeParagraphText(rawText)
+              : rawText.trim();
             if (text.length < 2) continue;
             var id = 'para_' + i;
             el.setAttribute('data-translate-id', id);
@@ -5682,6 +5816,48 @@ html, body {
         }
       } catch (err) {
         console.error('[WebView] Error removing translations:', err);
+      }
+    }
+
+    function handleApplyChapterTranslationVisibility(originalVisible, translationVisible, sectionIndex) {
+      try {
+        var indexed = getRendererContentForSection(sectionIndex);
+        var docs = [];
+        var contents = getRendererContents();
+        for (var ci = 0; ci < contents.length; ci++) {
+          if (contents[ci] && contents[ci].doc) docs.push(contents[ci].doc);
+        }
+        var targets = [];
+        if (indexed && indexed.doc) targets.push(indexed.doc);
+        else if (docs.length) targets = docs.slice();
+        else {
+          var iframes = document.querySelectorAll('iframe');
+          for (var fi = 0; fi < iframes.length; fi++) {
+            try {
+              var iframeDoc = iframes[fi].contentDocument || (iframes[fi].contentWindow && iframes[fi].contentWindow.document);
+              if (iframeDoc && iframeDoc.body) { targets.push(iframeDoc); break; }
+            } catch (e) {}
+          }
+        }
+        var hiddenOriginal = String(!originalVisible);
+        var hiddenTranslation = String(!translationVisible);
+        var solo = String(!originalVisible && translationVisible);
+        for (var di = 0; di < targets.length; di++) {
+          try {
+            var doc = targets[di];
+            var origEls = doc.querySelectorAll('[data-translate-id]');
+            for (var j = 0; j < origEls.length; j++) {
+              origEls[j].setAttribute('data-original-hidden', hiddenOriginal);
+            }
+            var els = doc.querySelectorAll('.readany-translation');
+            for (var i = 0; i < els.length; i++) {
+              els[i].setAttribute('data-hidden', hiddenTranslation);
+              els[i].setAttribute('data-solo', solo);
+            }
+          } catch (e) {}
+        }
+      } catch (err) {
+        console.error('[WebView] Error applying translation visibility:', err);
       }
     }
 

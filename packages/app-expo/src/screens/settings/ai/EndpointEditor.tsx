@@ -34,8 +34,8 @@ const PROVIDERS: { id: AIProviderType; label: string }[] = [
   { id: "openrouter", label: "OpenRouter" },
   { id: "siliconflow", label: "SiliconFlow" },
   { id: "moonshot", label: "Moonshot" },
-  { id: "zhipu", label: "智谱 GLM" },
-  { id: "aliyun", label: "阿里云通义" },
+  { id: "zhipu", label: "Zhipu GLM" },
+  { id: "aliyun", label: "Alibaba Tongyi" },
   { id: "custom", label: "Custom" },
 ];
 

@@ -9,12 +9,15 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSettingsStore } from "../stores/settings-store";
-import { getFromCache } from "../translation/cache";
+import { getFromCache, hashSourceTexts } from "../translation/cache";
 import {
+  type TranslationVisualMode,
   clearChapterCache,
+  fromVisualMode,
   getChapterTranslationSettings,
   isChapterFullyCached,
   markChapterFullyCached,
+  toVisualMode,
   updateChapterTranslationSettings,
 } from "../translation/chapter-cache";
 import type {
@@ -40,31 +43,59 @@ export type ChapterTranslationState =
 export interface UseChapterTranslationOptions {
   bookId: string;
   sectionIndex: number;
+  /** Stable chapter identity when available (stronger than positional index). */
+  chapterHref?: string;
+  chapterId?: string;
   aiConfig?: AIConfig;
   translationConfig?: TranslationConfig;
   /** Whether the reader is ready (DOM loaded) — auto-restore waits for this */
   ready?: boolean;
   /** Extract paragraphs from the current section DOM */
-  getParagraphs: () => Promise<ChapterParagraph[]> | ChapterParagraph[];
+  getParagraphs: (sectionIndex?: number) => Promise<ChapterParagraph[]> | ChapterParagraph[];
   /** Inject translated paragraphs into the DOM */
   injectTranslations: (
     results: ChapterTranslationResult[],
     visibility?: { originalVisible: boolean; translationVisible: boolean },
+    sectionIndex?: number,
   ) => void | Promise<void>;
   /** Remove all injected translations from the DOM */
-  removeTranslations: () => void;
+  removeTranslations: (sectionIndex?: number) => void;
   /** Apply visibility settings to the DOM */
-  applyVisibility?: (originalVisible: boolean, translationVisible: boolean) => void;
+  applyVisibility?: (
+    originalVisible: boolean,
+    translationVisible: boolean,
+    sectionIndex?: number,
+  ) => void;
   /** Get current reader position (CFI) — used to restore position after translation injection */
   getCurrentCfi?: () => string | undefined;
   /** Navigate to a CFI — used to restore position after translation injection */
   goToCfi?: (cfi: string) => void | Promise<void>;
+  /** Wait until layout is stable after DOM injection (replaces arbitrary sleeps). */
+  waitForLayoutStable?: () => Promise<void>;
+}
+
+function waitForNextFrames(frames = 2): Promise<void> {
+  return new Promise((resolve) => {
+    const raf =
+      typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame
+        : (cb: FrameRequestCallback) => setTimeout(() => cb(0), 16);
+    let remaining = frames;
+    const tick = () => {
+      remaining -= 1;
+      if (remaining <= 0) resolve();
+      else raf(tick);
+    };
+    raf(tick);
+  });
 }
 
 export function useChapterTranslation(options: UseChapterTranslationOptions) {
   const {
     bookId,
     sectionIndex,
+    chapterHref,
+    chapterId,
     aiConfig: aiConfigOverride,
     ready = true,
     translationConfig: translationConfigOverride,
@@ -74,15 +105,20 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
     applyVisibility,
     getCurrentCfi,
     goToCfi,
+    waitForLayoutStable,
   } = options;
 
   const [state, setState] = useState<ChapterTranslationState>({ status: "idle" });
   const abortRef = useRef<AbortController | null>(null);
+  const requestIdRef = useRef(0);
   const startTranslationRef = useRef<() => void>(() => {});
   const getParagraphsRef = useRef(getParagraphs);
   const injectTranslationsRef = useRef(injectTranslations);
+  const removeTranslationsRef = useRef(removeTranslations);
+  const applyVisibilityRef = useRef(applyVisibility);
   const getCurrentCfiRef = useRef(getCurrentCfi);
   const goToCfiRef = useRef(goToCfi);
+  const waitForLayoutStableRef = useRef(waitForLayoutStable);
   const visibilityRef = useRef({ originalVisible: true, translationVisible: true });
 
   const translationConfigFromStore = useSettingsStore((s) => s.translationConfig);
@@ -92,20 +128,29 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
 
   getParagraphsRef.current = getParagraphs;
   injectTranslationsRef.current = injectTranslations;
+  removeTranslationsRef.current = removeTranslations;
+  applyVisibilityRef.current = applyVisibility;
   getCurrentCfiRef.current = getCurrentCfi;
   goToCfiRef.current = goToCfi;
+  waitForLayoutStableRef.current = waitForLayoutStable;
 
   // ---- Start Translation ---------------------------------------------------
   /** @param overrideTargetLang — if provided, overrides the settings targetLang for this run */
   const startTranslation = useCallback(
     async (overrideTargetLang?: string) => {
-      // Clear previous translation if any
-      if (state.status !== "idle") {
-        abortRef.current?.abort();
-        abortRef.current = null;
-        removeTranslations();
-        await clearChapterCache(bookId, sectionIndex);
+      const requestId = ++requestIdRef.current;
+      const isCurrent = () => requestIdRef.current === requestId;
+      // Cancel any in-flight work for the previous request/chapter.
+      abortRef.current?.abort();
+      abortRef.current = null;
+      try {
+        removeTranslationsRef.current?.(sectionIndex);
+      } catch {
+        // no-op
       }
+      if (!isCurrent()) return;
+      // A fresh explicit translation invalidates previous chapter state.
+      await clearChapterCache(bookId, sectionIndex);
 
       // Build effective config (resolve AI endpoint)
       const config = { ...translationConfig };
@@ -126,15 +171,27 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
         }
       }
 
+      if (!isCurrent()) return;
       setState({ status: "extracting" });
 
       try {
-        const paragraphs = await getParagraphs();
+        const paragraphs = await getParagraphsRef.current?.(sectionIndex);
+        if (!isCurrent()) return;
 
         if (!paragraphs || paragraphs.length === 0) {
           setState({ status: "error", message: "No text to translate" });
           return;
         }
+        const capturedSection = sectionIndex;
+        const capturedHref = chapterHref;
+        const capturedChapterId = chapterId ?? String(sectionIndex);
+        const sourceHash = hashSourceTexts(paragraphs.map((p) => p.text));
+        const identity = {
+          bookId,
+          chapterId: capturedChapterId,
+          chapterHref: capturedHref,
+          sourceHash,
+        };
 
         const abortController = new AbortController();
         abortRef.current = abortController;
@@ -145,27 +202,46 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
           progress: { totalChars, translatedChars: 0 },
         });
 
-        await translateChapter({
+        const results = await translateChapter({
           paragraphs,
           sourceLang: "AUTO",
           targetLang: config.targetLang,
           config,
+          identity,
           onProgress: (progress) => {
+            if (!isCurrent()) return;
             setState({ status: "translating", progress });
           },
-          onChunkComplete: (results) => {
-            void injectTranslations(results, visibilityRef.current);
+          onChunkComplete: (chunkResults) => {
+            if (!isCurrent()) return;
+            void injectTranslationsRef.current?.(
+              chunkResults,
+              visibilityRef.current,
+              capturedSection,
+            );
           },
           signal: abortController.signal,
         });
+        if (!isCurrent()) return;
 
-        // Mark chapter fully cached
-        markChapterFullyCached(bookId, sectionIndex, config.targetLang).catch((err) =>
-          console.warn("[Translation] Failed to mark chapter cached:", err),
-        );
+        // Only mark fully cached when every paragraph persisted non-empty.
+        const hasEmpty = results.some((r) => !r.translatedText);
+        await markChapterFullyCached(bookId, capturedSection, config.targetLang, {
+          chapterHref: capturedHref,
+          chapterId: capturedChapterId,
+          sourceHash,
+          sourceLang: "AUTO",
+          providerId: config.provider.id,
+          verification: {
+            expectedCount: paragraphs.length,
+            actualCount: results.length,
+            hasEmpty,
+          },
+        });
 
         setState({ status: "complete", ...visibilityRef.current });
       } catch (err) {
+        if (!isCurrent()) return;
         if ((err as Error)?.name === "AbortError") {
           // Cancelled — keep whatever was already injected, go to complete
           setState({ status: "complete", ...visibilityRef.current });
@@ -176,19 +252,10 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
           });
         }
       } finally {
-        abortRef.current = null;
+        if (isCurrent()) abortRef.current = null;
       }
     },
-    [
-      state.status,
-      translationConfig,
-      aiConfig,
-      bookId,
-      sectionIndex,
-      getParagraphs,
-      injectTranslations,
-      removeTranslations,
-    ],
+    [translationConfig, aiConfig, bookId, sectionIndex, chapterHref, chapterId],
   );
 
   // Keep ref in sync so auto-restore effect doesn't depend on startTranslation identity
@@ -200,84 +267,129 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
     // State will be set to complete in the catch block above
   }, []);
 
-  // ---- Toggle Original Visibility -------------------------------------------
-  const toggleOriginalVisible = useCallback(() => {
-    setState((prev) => {
-      if (prev.status !== "complete") return prev;
-      const newVisible = !prev.originalVisible;
-      // Apply to DOM
-      applyVisibility?.(newVisible, prev.translationVisible);
-      visibilityRef.current = {
-        originalVisible: newVisible,
-        translationVisible: prev.translationVisible,
-      };
-      // Persist visibility preference
-      updateChapterTranslationSettings(bookId, sectionIndex, visibilityRef.current).catch(() => {});
-      return { ...prev, ...visibilityRef.current };
-    });
-  }, [applyVisibility, bookId, sectionIndex]);
+  const applyMode = useCallback(
+    (mode: TranslationVisualMode) => {
+      const visibility = fromVisualMode(mode);
+      visibilityRef.current = visibility;
+      try {
+        applyVisibilityRef.current?.(
+          visibility.originalVisible,
+          visibility.translationVisible,
+          sectionIndex,
+        );
+      } catch {
+        // no-op
+      }
+      updateChapterTranslationSettings(bookId, sectionIndex, {
+        ...visibility,
+        visualMode: mode,
+        targetLang: translationConfig.targetLang,
+      }).catch(() => {});
+      setState((prev) => {
+        if (prev.status !== "complete") return { status: "complete", ...visibility };
+        return { ...prev, ...visibility };
+      });
+    },
+    [bookId, sectionIndex, translationConfig.targetLang],
+  );
 
-  // ---- Toggle Translation Visibility ----------------------------------------
+  // ---- Explicit visual modes: ORIGINAL / TRANSLATION / BILINGUAL ------------
+  const setVisualMode = useCallback(
+    (mode: TranslationVisualMode) => {
+      applyMode(mode);
+    },
+    [applyMode],
+  );
+
+  // ---- Toggle Original Visibility (compat) ----------------------------------
+  const toggleOriginalVisible = useCallback(() => {
+    const current = toVisualMode(
+      visibilityRef.current.originalVisible,
+      visibilityRef.current.translationVisible,
+    );
+    if (current === "bilingual") applyMode("translation");
+    else if (current === "translation") applyMode("bilingual");
+    else applyMode("bilingual");
+  }, [applyMode]);
+
+  // ---- Toggle Translation Visibility (compat) --------------------------------
   const toggleTranslationVisible = useCallback(() => {
-    setState((prev) => {
-      if (prev.status !== "complete") return prev;
-      const newVisible = !prev.translationVisible;
-      // Apply to DOM
-      applyVisibility?.(prev.originalVisible, newVisible);
-      visibilityRef.current = {
-        originalVisible: prev.originalVisible,
-        translationVisible: newVisible,
-      };
-      // Persist visibility preference
-      updateChapterTranslationSettings(bookId, sectionIndex, visibilityRef.current).catch(() => {});
-      return { ...prev, ...visibilityRef.current };
-    });
-  }, [applyVisibility, bookId, sectionIndex]);
+    const current = toVisualMode(
+      visibilityRef.current.originalVisible,
+      visibilityRef.current.translationVisible,
+    );
+    if (current === "bilingual") applyMode("original");
+    else if (current === "original") applyMode("bilingual");
+    else applyMode("bilingual");
+  }, [applyMode]);
 
   // ---- Reset (e.g. on chapter change) ---------------------------------------
   const reset = useCallback(async () => {
+    requestIdRef.current += 1;
     abortRef.current?.abort();
     abortRef.current = null;
-    removeTranslations();
+    try {
+      removeTranslationsRef.current?.(sectionIndex);
+    } catch {
+      // no-op
+    }
+    visibilityRef.current = { originalVisible: true, translationVisible: true };
     setState({ status: "idle" });
     // Note: we do NOT clear the persistent chapter cache here.
     // This allows auto-restore to work when the user returns to this chapter.
-  }, [removeTranslations]);
+  }, [sectionIndex]);
 
   // ---- Auto-restore cached translations on section load -----------------------
   useEffect(() => {
     if (!ready || state.status !== "idle") return;
 
+    const requestId = ++requestIdRef.current;
     let cancelled = false;
     async function restoreCachedTranslations() {
       try {
-        const cached = await isChapterFullyCached(
-          bookId,
-          sectionIndex,
-          translationConfig.targetLang,
-        );
-        if (!cached || cancelled) return;
+        const capturedSection = sectionIndex;
+        const capturedHref = chapterHref;
+        const capturedChapterId = chapterId ?? String(sectionIndex);
+        const targetLang = translationConfig.targetLang;
+        const providerId = translationConfig.provider.id;
+        const cached = await isChapterFullyCached(bookId, capturedSection, targetLang);
+        if (!cached || cancelled || requestIdRef.current !== requestId) return;
 
-        // Load saved visibility preferences
-        const savedSettings = await getChapterTranslationSettings(bookId, sectionIndex);
+        // Load saved visibility preferences (scoped by language)
+        const savedSettings = await getChapterTranslationSettings(
+          bookId,
+          capturedSection,
+          targetLang,
+        );
+        // Provider change must not silently reuse incompatible results: require a
+        // provider-matching flag when identity is available, else fall back to
+        // per-paragraph verification below.
+        if (savedSettings?.providerId && savedSettings.providerId !== providerId) {
+          return;
+        }
         const visibility = {
           originalVisible: savedSettings?.originalVisible ?? true,
           translationVisible: savedSettings?.translationVisible ?? true,
         };
         visibilityRef.current = visibility;
 
-        const paragraphs = await getParagraphsRef.current();
-        if (cancelled) return;
-        const providerId = translationConfig.provider.id;
+        const paragraphs = await getParagraphsRef.current?.(capturedSection);
+        if (cancelled || requestIdRef.current !== requestId || !paragraphs?.length) return;
+        const sourceHash = hashSourceTexts(paragraphs.map((p) => p.text));
+        if (savedSettings?.sourceHash && savedSettings.sourceHash !== sourceHash) {
+          return;
+        }
+        const identity = {
+          bookId,
+          chapterId: capturedChapterId,
+          chapterHref: capturedHref,
+          sourceHash,
+        };
         const results: ChapterTranslationResult[] = [];
 
         for (const p of paragraphs) {
-          const translation = await getFromCache(
-            p.text,
-            "AUTO",
-            translationConfig.targetLang,
-            providerId,
-          );
+          if (cancelled || requestIdRef.current !== requestId) return;
+          const translation = await getFromCache(p.text, "AUTO", targetLang, providerId, identity);
           if (translation) {
             results.push({
               paragraphId: p.id,
@@ -287,22 +399,25 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
           }
         }
 
-        if (results.length > 0 && !cancelled) {
+        if (results.length > 0 && !cancelled && requestIdRef.current === requestId) {
           // Remember position before injection
           const cfiBeforeInject = getCurrentCfiRef.current?.();
-          const visibility = visibilityRef.current;
 
-          await injectTranslationsRef.current(results, visibility);
-          if (cancelled) return;
+          await injectTranslationsRef.current?.(results, visibility, capturedSection);
+          if (cancelled || requestIdRef.current !== requestId) return;
 
-          // Restore position after translation content changes layout.
-          // Add delay to ensure DOM/layout has stabilized before restoring position
+          // Restore position after layout is actually stable (no arbitrary sleep).
           if (cfiBeforeInject && goToCfiRef.current) {
-            await new Promise((resolve) => setTimeout(resolve, 100));
-            if (cancelled) return;
+            try {
+              if (waitForLayoutStableRef.current) await waitForLayoutStableRef.current();
+              else await waitForNextFrames(2);
+            } catch {
+              // no-op
+            }
+            if (cancelled || requestIdRef.current !== requestId) return;
             await goToCfiRef.current(cfiBeforeInject);
           }
-          if (cancelled) return;
+          if (cancelled || requestIdRef.current !== requestId) return;
 
           setState({
             status: "complete",
@@ -324,6 +439,8 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
     state.status,
     bookId,
     sectionIndex,
+    chapterHref,
+    chapterId,
     translationConfig.targetLang,
     translationConfig.provider.id,
   ]);
@@ -334,6 +451,11 @@ export function useChapterTranslation(options: UseChapterTranslationOptions) {
     cancelTranslation,
     toggleOriginalVisible,
     toggleTranslationVisible,
+    setVisualMode,
+    visualMode:
+      state.status === "complete"
+        ? toVisualMode(state.originalVisible, state.translationVisible)
+        : ("bilingual" as TranslationVisualMode),
     reset,
   };
 }

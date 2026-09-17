@@ -593,6 +593,46 @@
           "fail": "ReadAny Skill is not installed at {{path}}."
         }
       }
-    }
+    },
+    "ai_modelsCount": "{{count}} models",
+    "ai_searchModelPlaceholder": "Search models...",
+    "security": "Security",
+    "vm_builtinTitle": "Local models",
+    "vm_dimensions": "{{dimension}} dims · {{size}}",
+    "vm_dimensionsEn": "{{dimension}} dims · {{size}} · English",
+    "vm_downloading": "Downloading {{progress}}%",
+    "vm_downloadUse": "Download & use",
+    "vm_deleteModel": "Delete local model"
+  },
+  "applock": {
+    "biometric": "Biometric unlock",
+    "biometricHint": "Fingerprint / face, falls back to PIN",
+    "biometricPrompt": "Unlock ReadAny",
+    "biometricUnavailable": "Not available on this device — PIN will be used",
+    "changePin": "Set / change PIN",
+    "clearBody": "This removes your PIN and disables App Lock.",
+    "clearPin": "Remove PIN & disable lock",
+    "clearTitle": "Remove App Lock?",
+    "enable": "App Lock",
+    "enableHint": "Require authentication when opening ReadAny",
+    "hintBioOrPin": "Use biometrics or enter your PIN",
+    "hintPin": "Enter your PIN to continue reading",
+    "lockOnBackground": "Lock when backgrounded",
+    "lockOnBackgroundHint": "Lock again when returning from background",
+    "pinConfirmPlaceholder": "Repeat PIN",
+    "pinInvalid": "Use 4-8 digits.",
+    "pinInvalidTitle": "Invalid PIN",
+    "pinMismatch": "Type the same PIN twice.",
+    "pinMismatchTitle": "PINs do not match",
+    "pinPlaceholder": "4-8 digits",
+    "setPin": "Set PIN",
+    "title": "ReadAny is locked",
+    "useBiometric": "Use biometrics",
+    "wrongPin": "Wrong PIN, try again"
+  },
+  "feedback": {
+    "detailLoadFailed": "Failed to load, please try again later",
+    "noReplies": "No replies yet, we will handle it soon.",
+    "replies": "Replies"
   }
 }

@@ -6,7 +6,7 @@
  */
 
 import type { TranslationConfig } from "../types/translation";
-import { getFromCache, storeInCache } from "./cache";
+import { type TranslationIdentity, getFromCache, storeInCache } from "./cache";
 import { aiTranslateBatch } from "./providers";
 import { deeplTranslate } from "./providers";
 import { microsoftTranslate } from "./providers";
@@ -40,6 +40,8 @@ export interface TranslateChapterOptions {
   sourceLang: string;
   targetLang: string;
   config: TranslationConfig;
+  /** Stable identity used for scoped cache keys (book/chapter/source). */
+  identity?: TranslationIdentity;
   /** Target characters per API call (default 2000) */
   charsPerChunk?: number;
   /** Max concurrent chunk requests (default 2) */
@@ -109,28 +111,29 @@ export async function translateChapter(
   } = options;
 
   const providerId = config.provider.id;
+  const identity = options.identity;
 
   // Calculate total characters for progress
   const totalChars = paragraphs.reduce((sum, p) => sum + p.text.length, 0);
 
-  // 1. Check cache for each paragraph -----------------------------------------
+  // 1. Check cache for each paragraph (order-preserving) -----------------------
+  const cachedFlags = await Promise.all(
+    paragraphs.map((p) => getFromCache(p.text, sourceLang, targetLang, providerId, identity)),
+  );
   const allResults: ChapterTranslationResult[] = [];
   const uncachedParas: ChapterParagraph[] = [];
-
-  await Promise.all(
-    paragraphs.map(async (p) => {
-      const cached = await getFromCache(p.text, sourceLang, targetLang, providerId);
-      if (cached) {
-        allResults.push({
-          paragraphId: p.id,
-          originalText: p.text,
-          translatedText: cached,
-        });
-      } else {
-        uncachedParas.push(p);
-      }
-    }),
-  );
+  paragraphs.forEach((p, i) => {
+    const cached = cachedFlags[i];
+    if (cached) {
+      allResults.push({
+        paragraphId: p.id,
+        originalText: p.text,
+        translatedText: cached,
+      });
+    } else {
+      uncachedParas.push(p);
+    }
+  });
 
   // Emit cached results immediately so the UI can render them
   if (allResults.length > 0) {
@@ -196,21 +199,28 @@ export async function translateChapter(
         translatedTexts = texts.map(() => "");
       }
 
-      // Store results + cache
+      if (signal?.aborted) return;
+      // Store results + cache (never persist empty strings)
       const chunkResults: ChapterTranslationResult[] = [];
       for (let i = 0; i < chunk.length; i++) {
+        const translated = translatedTexts[i] || "";
         const result: ChapterTranslationResult = {
           paragraphId: chunk[i].id,
           originalText: chunk[i].text,
-          translatedText: translatedTexts[i] || "",
+          translatedText: translated,
         };
         chunkResults.push(result);
         newResults.push(result);
 
-        if (translatedTexts[i]) {
-          storeInCache(chunk[i].text, translatedTexts[i], sourceLang, targetLang, providerId).catch(
-            (err) => console.warn("[Translation] Failed to cache translation result:", err),
-          );
+        if (translated) {
+          storeInCache(
+            chunk[i].text,
+            translated,
+            sourceLang,
+            targetLang,
+            providerId,
+            identity,
+          ).catch((err) => console.warn("[Translation] Failed to cache translation result:", err));
         }
       }
 
@@ -229,5 +239,12 @@ export async function translateChapter(
   }
   await Promise.all(workers);
 
-  return [...allResults, ...newResults];
+  if (signal?.aborted) {
+    throw new DOMException("Aborted", "AbortError");
+  }
+  const combined = [...allResults, ...newResults];
+  // Sort back into document order so callers do not depend on worker completion order.
+  const order = new Map(paragraphs.map((p, i) => [p.id, i]));
+  combined.sort((a, b) => (order.get(a.paragraphId) ?? 0) - (order.get(b.paragraphId) ?? 0));
+  return combined;
 }

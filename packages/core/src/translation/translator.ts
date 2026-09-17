@@ -11,7 +11,19 @@ export { ErrorCodes } from "./types";
 export { getTranslator, getTranslators, aiProvider, deeplProvider } from "./providers";
 
 // Cache
-export { getFromCache, storeInCache, clearTranslationCache } from "./cache";
+export {
+  getFromCache,
+  storeInCache,
+  clearTranslationCache,
+  clearParagraphCacheForChapter,
+  isCompleteTranslation,
+  matchParagraphKeysForChapter,
+  stableTextHash,
+  hashSourceTexts,
+  TRANSLATION_CACHE_VERSION,
+  type ParagraphChapterQuery,
+  type TranslationIdentity,
+} from "./cache";
 
 // Chapter-level translation
 export {
@@ -21,7 +33,70 @@ export {
   type ChapterTranslationResult,
   type TranslateChapterOptions,
 } from "./chapter-translator";
-export { isChapterFullyCached, markChapterFullyCached } from "./chapter-cache";
+export {
+  isChapterFullyCached,
+  markChapterFullyCached,
+  clearChapterCache,
+  getChapterTranslationSettings,
+  updateChapterTranslationSettings,
+  listChapterFlagKeysForBook,
+  matchChapterFlagKeys,
+  toVisualMode,
+  fromVisualMode,
+  CHAPTER_CACHE_VERSION,
+  type ChapterFlagQuery,
+  type ChapterTranslationIdentity,
+  type ChapterTranslationSettings,
+  type TranslationVisualMode,
+} from "./chapter-cache";
+
+// Shared text primitives (paragraph normalization, CJK whole-word rule)
+export {
+  CJK_SCRIPT_RE,
+  effectiveWholeWord,
+  normalizeParagraphText,
+  shouldBypassWholeWordForQuery,
+  splitPlainTextToParagraphs,
+  type PlainTextParagraph,
+} from "./translation-text";
+
+// Book Overview data layer + full-book translation queue
+export {
+  buildReaderParamsForAnnotation,
+  buildReaderParamsForChapter,
+  buildReaderParamsForContinue,
+  buildReaderParamsForSearch,
+  deriveChapterStatuses,
+  filterOverviewChapters,
+  getTranslatedChapterTitles,
+  resolveLibraryTapAction,
+  sectionIndexFromCfi,
+  setTranslatedChapterTitle,
+  sortOverviewChapters,
+  type ChapterStatusInput,
+  type ChapterTranslationStatus,
+  type ChapterSortOrder,
+  type ChapterStatusFilter,
+  type LibraryTapAction,
+  type OverviewChapterRef,
+  type ReaderChapterParams,
+} from "./book-overview";
+export {
+  computeResumePending,
+  createBookTranslationTask,
+  loadBookTranslationTask,
+  planBookTranslationScope,
+  resolveEffectiveTranslationConfig,
+  runBookTranslationQueue,
+  saveBookTranslationTask,
+  bookTranslationTaskKey,
+  type BookQueueDeps,
+  type BookQueueEvent,
+  type BookTranslationScope,
+  type BookTranslationTaskRecord,
+  type BookTranslationTaskStatus,
+  type RunBookTranslationOptions,
+} from "./book-translation-queue";
 
 // Language support
 export const SUPPORTED_LANGUAGES = [

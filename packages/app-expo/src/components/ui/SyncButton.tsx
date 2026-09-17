@@ -57,7 +57,14 @@ export function SyncButton({ size = 20, color }: SyncButtonProps) {
   });
 
   return (
-    <TouchableOpacity onPress={handlePress} activeOpacity={0.7} hitSlop={8}>
+    <TouchableOpacity
+      onPress={handlePress}
+      activeOpacity={0.7}
+      // 44x44 target like the sibling header buttons (was icon-size only).
+      hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+      style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}
+      accessibilityRole="button"
+    >
       <Animated.View style={{ transform: [{ rotate: spin }] }}>
         <RefreshCwIcon size={size} color={color} />
       </Animated.View>

@@ -70,4 +70,6 @@ export {
   splitEditableList,
 } from "./book-metadata";
 export { getBookProgressPercent, normalizeBookProgress } from "./book-progress";
+export { lruRecordDelete, lruRecordPut } from "./lru-record";
+export { decodeXmlEntitiesOnce } from "./text-entities";
 export type { BookMetadataFormValues, ExtractedBookMetadata } from "./book-metadata";

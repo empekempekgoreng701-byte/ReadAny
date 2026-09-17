@@ -24,6 +24,18 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { GalleryImage } from "./ReaderTOCPanel";
 import { makeStyles } from "./reader-styles";
 
+/** Stable image key: prefers CFI locator, falls back to section/index/alt. */
+export function imageStableKey(item: {
+  sectionIndex: number;
+  imgIndex: number;
+  cfi?: string | null;
+  alt?: string;
+}): string {
+  if (item.cfi) return `cfi:${item.cfi}`;
+  const alt = (item.alt || "").trim().slice(0, 32).replace(/[^a-zA-Z0-9_-]/g, "_");
+  return `sec:${item.sectionIndex}:idx:${item.imgIndex}${alt ? `:alt:${alt}` : ""}`;
+}
+
 function GalleryThumb({
   item,
   index,
@@ -50,8 +62,8 @@ function GalleryThumb({
           backgroundColor: colors.muted,
         }}
         activeOpacity={0.75}
-        onPress={() => onPreview(index)}
-        onLongPress={() => onGoToImage(item.sectionIndex, item.imgIndex)}
+        onPress={() => onGoToImage(item.sectionIndex, item.imgIndex)}
+        onLongPress={() => onPreview(index)}
         delayLongPress={400}
       >
         {dataUrl ? (
@@ -66,7 +78,7 @@ function GalleryThumb({
         style={{ fontSize: fontSize.xs, color: colors.mutedForeground, marginTop: 2 }}
         numberOfLines={1}
       >
-        {item.alt || t("reader.imageNo", { n: index + 1, defaultValue: `图 ${index + 1}` })}
+        {item.alt || t("reader.imageNo", { n: index + 1, defaultValue: `Image ${index + 1}` })}
       </Text>
     </View>
   );
@@ -98,7 +110,7 @@ export function ImageGalleryGrid({
         <Text style={s.notebookPlaceholderText}>
           {t("reader.imagesIndexing", {
             pct: Math.round(imageProgress * 100),
-            defaultValue: `正在收集图片…${Math.round(imageProgress * 100)}%`,
+            defaultValue: `Collecting images... ${Math.round(imageProgress * 100)}%`,
           })}
         </Text>
       </View>
@@ -108,31 +120,37 @@ export function ImageGalleryGrid({
   if (images.length === 0) {
     return (
       <View style={s.notebookPlaceholder}>
-        <Text style={s.notebookPlaceholderText}>{t("reader.noImages", "本书暂无图片")}</Text>
+        <Text style={s.notebookPlaceholderText}>{t("reader.noImages", "No images in this book")}</Text>
         <Text style={[s.notebookPlaceholderText, { fontSize: fontSize.xs, opacity: 0.6 }]}>
-          {t("reader.noImagesHint", "点按正文中的图片可全屏查看")}
+          {t("reader.noImagesHint", "Tap an image in the text to view fullscreen")}
         </Text>
       </View>
     );
   }
 
   // Phase 11 §4: virtualized grid — only visible/near-visible thumbs load.
+  // NOTE: must NOT be frozen via useRef().current — that pins the first-render
+  // `images`/`onRequestThumb` closure forever, so thumbs skipped (or requested
+  // with stale data) never recover when the gallery finishes loading.
   const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 10 }).current;
-  const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken[] }) => {
-    for (const v of viewableItems) {
-      const idx = v.index;
-      if (idx == null || idx < 0 || idx >= images.length) continue;
-      const item = images[idx];
-      if (!item) continue;
-      onRequestThumb(item.sectionIndex, item.imgIndex);
-    }
-  }).current;
+  const onViewableItemsChanged = useCallback(
+    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
+      for (const v of viewableItems) {
+        const idx = v.index;
+        if (idx == null || idx < 0 || idx >= images.length) continue;
+        const item = images[idx];
+        if (!item) continue;
+        onRequestThumb(item.sectionIndex, item.imgIndex);
+      }
+    },
+    [images, onRequestThumb],
+  );
   const renderThumb = useCallback(
     ({ item, index }: { item: GalleryImage; index: number }) => (
       <GalleryThumb
         item={item}
         index={index}
-        dataUrl={imageDataMap[`${item.sectionIndex}:${item.imgIndex}`]}
+        dataUrl={imageDataMap[imageStableKey(item)] ?? imageDataMap[`${item.sectionIndex}:${item.imgIndex}`]}
         onPreview={onPreview}
         onGoToImage={onGoToImage}
       />
@@ -152,13 +170,13 @@ export function ImageGalleryGrid({
       >
         {t("reader.imagesHint", {
           count: images.length,
-          defaultValue: `${images.length} 张 · 点按预览，长按跳到位置`,
+          defaultValue: `${images.length} images · Tap to go to location, long-press to preview`,
         })}
       </Text>
       <FlatList
         data={images}
         renderItem={renderThumb}
-        keyExtractor={(item) => `${item.sectionIndex}:${item.imgIndex}`}
+        keyExtractor={(item) => imageStableKey(item)}
         numColumns={3}
         columnWrapperStyle={{ justifyContent: "space-between" }}
         showsVerticalScrollIndicator={false}
@@ -276,7 +294,7 @@ export function ImageFullscreenViewer({
             onPress={onGoToLocation}
           >
             <Text style={{ color: "#fff", fontSize: 13, fontWeight: "600" }}>
-              {t("reader.goToImageLocation", "跳到位置")}
+              {t("reader.goToImageLocation", "Go to location")}
             </Text>
           </TouchableOpacity>
           <TouchableOpacity onPress={onNext} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>

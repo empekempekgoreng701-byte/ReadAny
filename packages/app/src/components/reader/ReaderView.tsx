@@ -592,17 +592,31 @@ export function ReaderView({ bookId, tabId }: ReaderViewProps) {
   // Separate delayed ready for chapter translation (avoids DOM conflict with CFI navigation)
   const [translationReady, setTranslationReady] = useState(false);
 
-  // Chapter translation hook
+  // Chapter translation hook (section-aware, P0-2/P0-4: no contents[0] assumption)
   const chapterTranslation = useChapterTranslation({
     bookId,
     sectionIndex: currentSectionIndex,
+    chapterHref: readerTab?.chapterHref ?? bookDoc?.sections?.[currentSectionIndex]?.href,
+    chapterId: String(currentSectionIndex),
     ready: translationReady,
-    getParagraphs: () => foliateRef.current?.getChapterParagraphs() ?? [],
-    injectTranslations: (results, visibility) =>
-      foliateRef.current?.injectChapterTranslations(results, visibility),
-    removeTranslations: () => foliateRef.current?.removeChapterTranslations(),
-    applyVisibility: (originalVisible, translationVisible) =>
-      foliateRef.current?.applyChapterTranslationVisibility(originalVisible, translationVisible),
+    getParagraphs: (section) =>
+      foliateRef.current?.getChapterParagraphs(section ?? currentSectionIndexRef.current) ?? [],
+    injectTranslations: (results, visibility, section) =>
+      foliateRef.current?.injectChapterTranslations(
+        results,
+        visibility,
+        section ?? currentSectionIndexRef.current,
+      ),
+    removeTranslations: (section) => {
+      if (section === undefined) foliateRef.current?.removeChapterTranslations();
+      else foliateRef.current?.removeChapterTranslations(section);
+    },
+    applyVisibility: (originalVisible, translationVisible, section) =>
+      foliateRef.current?.applyChapterTranslationVisibility(
+        originalVisible,
+        translationVisible,
+        section ?? currentSectionIndexRef.current,
+      ),
     getCurrentCfi: () => readerTab?.currentCfi,
     goToCfi: (cfi) => foliateRef.current?.goToCFI(cfi),
   });

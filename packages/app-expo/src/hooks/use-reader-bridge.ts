@@ -100,6 +100,7 @@ export interface ReaderBridgeCallbacks {
     }>;
   }) => void;
   onImageGalleryProgress?: (progress: number) => void;
+  onImageGalleryError?: (message: string) => void;
   onImageData?: (detail: {
     sectionIndex: number;
     imgIndex: number;
@@ -245,7 +246,7 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
   );
 
   const search = useCallback(
-    (query: string, opts?: { matchCase?: boolean; wholeWord?: boolean }) => {
+    (query: string, opts?: { matchCase?: boolean; wholeWord?: boolean; direction?: string }) => {
       inject(`window.search(${JSON.stringify(query)}, ${JSON.stringify(opts ?? {})})`);
     },
     [inject],
@@ -792,6 +793,23 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
     `);
   }, []);
 
+  const applyChapterTranslationVisibility = useCallback(
+    (originalVisible: boolean, translationVisible: boolean, sectionIndex?: number) => {
+      const indexArg = typeof sectionIndex === "number" ? String(sectionIndex) : "undefined";
+      webViewRef.current?.injectJavaScript(`
+      (function() {
+        try {
+          if (window.doApplyChapterTranslationVisibility) {
+            window.doApplyChapterTranslationVisibility(${originalVisible}, ${translationVisible}, ${indexArg});
+          }
+        } catch(e) {}
+      })();
+      true;
+    `);
+    },
+    [],
+  );
+
   // ─── Ruby Annotation Commands ───
   const setRubyDicts = useCallback((wordDictJson: string | null, charDictJson: string | null) => {
     const wordArg = wordDictJson ? JSON.stringify(wordDictJson) : "null";
@@ -908,6 +926,9 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
             break;
           case "imageGalleryProgress":
             cb.onImageGalleryProgress?.(Number(msg.progress) || 0);
+            break;
+          case "imageGalleryError":
+            cb.onImageGalleryError?.(String(msg.message || "gallery error"));
             break;
           case "imageData":
             cb.onImageData?.({
@@ -1162,6 +1183,7 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
       getChapterParagraphs,
       injectChapterTranslations,
       removeChapterTranslations,
+      applyChapterTranslationVisibility,
       setRubyDicts,
       injectRuby,
       removeRuby,
@@ -1209,6 +1231,7 @@ export function useReaderBridge(callbacks: ReaderBridgeCallbacks) {
       getChapterParagraphs,
       injectChapterTranslations,
       removeChapterTranslations,
+      applyChapterTranslationVisibility,
       setRubyDicts,
       injectRuby,
       removeRuby,
